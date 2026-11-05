@@ -6,7 +6,7 @@
 import {
   analyzeSpatial, AlertEngine, describeScene, Priority, Proximity, NOMES,
   MotionTracker, corDoSemaforo, analisarPiso, obstaculosDoPiso, avisoDePiso,
-  Narrador, Verbosidade,
+  Narrador, Verbosidade, associarCortantes,
 } from "./core.js";
 import { amostrarSemaforo, Segmentador } from "./vision.js";
 import { Leitor } from "./ocr.js";
@@ -418,6 +418,7 @@ function processFrame(now) {
 
   let objects = analyzeSpatial(detections);
   objects = motion.update(objects, ts);
+  objects = associarCortantes(objects);   // faca na mão herda a distância da pessoa
 
   // cor do semáforo: o COCO detecta o poste, não a luz acesa
   for (const o of objects) {

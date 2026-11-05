@@ -21,10 +21,16 @@ próprio aparelho**: nenhuma imagem da câmera sai dele.
 | **Calçada, via, caminho** | SegFormer-B0 / ADE20K | segmentação, ~4 MB |
 | **Degrau, escada, poste, corrimão** | SegFormer-B0 / ADE20K | o detector de objetos não vê nenhum |
 | **Leitura de texto** (placas, letreiros) | Tesseract.js, português | ~7 MB no primeiro uso |
+| **Objeto pontiagudo junto a pessoa** | COCO (`knife`, `scissors`, `baseball bat`) | linguagem hedgeada, ver ressalva |
 | Descrição da cena | lógica própria | botão "O que tem aqui?" |
 | Diário do piloto | local, em JSON | para a validação com usuários |
 
 ### O que ainda **não** faz
+
+**Arma de fogo não é detectada.** O COCO não tem classe de arma — há um teste que
+trava isso no contrato. O app reconhece faca, tesoura e taco, e os anuncia como
+"objeto pontiagudo", nunca como arma. Um falso positivo aqui causa pânico e pode
+acusar alguém injustamente.
 
 **Buraco não é detectado.** Não existe no COCO nem no ADE20K, e exige modelo treinado
 especificamente — ver "Próximos passos". Até lá, o app não avisa buraco. Não prometa isso
@@ -65,9 +71,17 @@ Toda regra de decisão mora em `core.js`, sem dependência de navegador, e é te
 ## Rodar local
 
 ```bash
-node --test test/core.test.mjs    # testes da lógica
+node --test test/core.test.mjs    # 28 testes da lógica
+node test/simular.mjs             # simula cenários e imprime o que seria falado
+node test/simular.mjs faca        # um cenário só
 npx serve .                       # http://localhost:3000
 ```
+
+O **simulador** alimenta o pipeline real (espacial → aproximação → cortantes →
+alertas → narrador) com cenas sintéticas a 12 qps e imprime a linha do tempo da
+fala. Ele valida a *política de fala*, não a qualidade do detector: as detecções
+ali são perfeitas, e na rua o EfficientDet erra. Quatro defeitos de fala foram
+encontrados por ele antes de chegarem ao usuário.
 
 `localhost` é contexto seguro, então a câmera funciona sem HTTPS no Chrome e no Edge.
 Em qualquer outro endereço, **a câmera exige https**.
