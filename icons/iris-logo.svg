@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Projeto Íris">
+  <title>Projeto Íris</title>
+  <defs>
+    <radialGradient id="iris" cx="42%" cy="36%" r="72%">
+      <stop offset="0%"  stop-color="#7FE9FF"/>
+      <stop offset="34%" stop-color="#00B2FF"/>
+      <stop offset="68%" stop-color="#1F5BE0"/>
+      <stop offset="100%" stop-color="#6B3FD4"/>
+    </radialGradient>
+    <linearGradient id="palpebra" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#8FF0FF"/>
+      <stop offset="50%" stop-color="#15A9FF"/>
+      <stop offset="100%" stop-color="#7B4DFF"/>
+    </linearGradient>
+    <radialGradient id="brilhoFundo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#1B4A8A" stop-opacity=".55"/>
+      <stop offset="100%" stop-color="#0A1A2F" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <circle cx="100" cy="100" r="96" fill="url(#brilhoFundo)"/>
+
+  <!-- íris -->
+  <circle cx="100" cy="100" r="54" fill="url(#iris)"/>
+
+  <!-- lâminas do diafragma: a câmera que enxerga pelo usuário -->
+  <g stroke="#0A1A2F" stroke-opacity=".42" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M100 46 L100 72"/>
+    <path d="M146.8 73 L124.3 86"/>
+    <path d="M146.8 127 L124.3 114"/>
+    <path d="M100 154 L100 128"/>
+    <path d="M53.2 127 L75.7 114"/>
+    <path d="M53.2 73 L75.7 86"/>
+  </g>
+  <circle cx="100" cy="100" r="54" fill="none" stroke="#0A1A2F" stroke-opacity=".30" stroke-width="3"/>
+
+  <!-- pupila -->
+  <circle cx="100" cy="100" r="23" fill="#07111F"/>
+  <circle cx="91" cy="91" r="7.5" fill="#FFFFFF" fill-opacity=".92"/>
+  <circle cx="108" cy="110" r="3" fill="#8FF0FF" fill-opacity=".7"/>
+
+  <!-- contorno do olho -->
+  <path d="M8 100 C40 44 160 44 192 100 C160 156 40 156 8 100 Z"
+        fill="none" stroke="url(#palpebra)" stroke-width="9" stroke-linejoin="round"/>
+</svg>

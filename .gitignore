@@ -1,0 +1,15 @@
+# backup da versão anterior ao Projeto Íris, local
+.backup-pre-iris/
+
+# sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editores
+.vscode/
+.idea/
+*.swp
+
+# nada de node aqui: o PWA é estático, sem build
+node_modules/
