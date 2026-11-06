@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.8.1">
+<meta name="iris-versao" content="0.8.2">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -45,7 +45,12 @@
     color: var(--texto);
     font-family: "Atkinson Hyperlegible", -apple-system, "Segoe UI", Roboto, sans-serif;
     display: grid;
-    grid-template-rows: auto auto 1fr auto;
+    /* cabeçalho, faixa do módulo, barra da rota, CÂMERA, barra de ações.
+       São cinco linhas para cinco filhos: faltar uma joga a câmera para uma
+       linha implícita de altura automática, e ela colapsa para zero — o vídeo
+       continua tocando, invisível. O minmax(0, 1fr) é o que deixa a câmera
+       encolher de verdade em telas baixas, em vez de empurrar os botões. */
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
              env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     -webkit-user-select: none; user-select: none;
@@ -246,11 +251,17 @@
 
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   @media (prefers-reduced-motion: reduce) { .acao, .principal, .icone-btn { transition: none; } }
+  /* Tela baixa: tudo encolhe para a câmera não ficar espremida. A barra da
+     rota foi acrescentada na 0.8 e tira ~66 px de altura que antes eram da
+     imagem — em aparelho pequeno isso se nota. */
   @media (max-height: 700px) {
     .acao { min-height: 72px; font-size: .85rem; }
     .principal { width: 90px; height: 90px; font-size: .85rem; }
     .modulo { padding: 8px 12px; }
     .modulo b { font-size: .95rem; }
+    .rota button { min-height: 48px; font-size: .92rem; }
+    .rota { margin-bottom: 6px; }
+    .view { min-height: 160px; }
   }
 </style>
 </head>
