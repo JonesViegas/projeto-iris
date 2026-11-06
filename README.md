@@ -215,6 +215,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
+| `test/layout.test.mjs` | Guarda do grid: a câmera precisa ter altura |
 
 Toda regra de decisão mora em `core.js`, `fala.js` e `navegacao.js` — sem dependência de
 navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GPS e a rede.
@@ -224,7 +225,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/core.test.mjs test/fala.test.mjs test/navegacao.test.mjs   # 62 testes
+node --test test/*.test.mjs      # 66 testes: lógica, fala, navegação e layout
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
