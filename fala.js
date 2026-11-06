@@ -131,13 +131,29 @@ export class FilaDeFala {
 
     this.pendentes.delete(canal);
     this.ultimaDoCanal.set(canal, agoraMs);
-    if (item.chave) this.ultimaChave.set(item.chave, agoraMs);
+    if (item.chave) {
+      this.ultimaChave.set(item.chave, agoraMs);
+      this.#podar(agoraMs);
+    }
     this.ultimoTexto = item.texto;
     this.ultimoTs = agoraMs;
     // `item` volta inteiro para quem oferecer quiser recuperar o que anexou
     // (o simulador usa isso para mostrar a prioridade real da fala emitida,
     // que pode sair vários quadros depois de ter sido oferecida).
     return { texto: item.texto, canal, interromper: podeInterromper && falando, item };
+  }
+
+  /**
+   * A chave de uma narração agregada combina os objetos da frase, então o
+   * número de chaves possíveis cresce com as combinações da cena, não com o
+   * número de classes. Numa caminhada longa isso enche o mapa sem limite.
+   * Chave vencida não serve para nada: o que passou do cooldown sai.
+   */
+  #podar(agoraMs) {
+    if (this.ultimaChave.size < 400) return;
+    for (const [k, ts] of this.ultimaChave) {
+      if (agoraMs - ts > this.cooldownChaveMs) this.ultimaChave.delete(k);
+    }
   }
 
   /** Descarta o que estiver pendente abaixo de um canal (um alerta chegou). */

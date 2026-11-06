@@ -216,6 +216,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
 | `test/layout.test.mjs` | Guarda do grid: a câmera precisa ter altura |
+| `test/carga.test.mjs` | Carrega o `app.js` num DOM de mentira e vê se sobrevive |
 
 Toda regra de decisão mora em `core.js`, `fala.js` e `navegacao.js` — sem dependência de
 navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GPS e a rede.
@@ -225,7 +226,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/*.test.mjs      # 66 testes: lógica, fala, navegação e layout
+node --test test/*.test.mjs      # 68 testes: lógica, fala, navegação, layout e carga
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
@@ -328,6 +329,48 @@ O ditado já existe no campo de destino; falta conversar ("a farmácia mais pert
 esteja aberta agora").
 
 ---
+
+---
+
+## Memória: o limite real do aparelho
+
+É aqui que o app morre, e morre em silêncio: quando o navegador fica sem memória
+ele mata a aba inteira. Nenhum código nosso roda nesse instante — não há evento, não
+há erro, não há log. Quem está testando vê a página de erro do navegador e não tem
+o que relatar além de "caiu".
+
+**Quanto cada peça custa, por alto:**
+
+| Peça | Memória |
+|---|---|
+| Detector de objetos (EfficientDet-Lite0 + WASM) | ~60 MB |
+| Precisão alta (Lite2) em vez do Lite0 | +40 MB |
+| Aviso de calçada (SegFormer-B0) | ~120 MB |
+| Reconhecimento ampliado (OWL-ViT) | ~250 MB, com picos maiores |
+
+Um celular comum tem 4 GB, dos quais o Chrome entrega bem menos a uma aba. Somar
+detector, calçada e ampliado estoura.
+
+**O que o app faz a respeito:**
+
+1. **Calçada e ampliado não ligam juntos.** Ligar um desliga o outro, e o app diz
+   por quê. Eram os dois modelos pesados disputando a mesma memória.
+2. **Porteira de memória.** Abaixo de 4 GB declarados, o app recusa o
+   reconhecimento ampliado antes de baixar 90 MB para depois cair.
+3. **O laço de quadros para durante a varredura ampliada.** Manter o detector
+   rápido a 12 qps com um segundo modelo na memória é o que estoura o aparelho.
+4. **Guarda de queda.** O app grava uma marca ao começar e a apaga ao parar
+   limpo. Se na abertura seguinte a marca ainda estiver lá, a sessão anterior foi
+   morta pelo navegador: ele **desliga o que estava pesando, diz isso em voz alta**
+   e volta funcionando. Sem isso, a pessoa reabre e cai de novo, para sempre.
+5. **O service worker não guarda arquivo acima de 60 MB.** Quando a cota de
+   armazenamento estoura, o navegador apaga tudo do domínio — inclusive os arquivos
+   do app, que são o que o faz abrir sem internet. Perder o cache do modelo é
+   baixar de novo; perder o cache do app é o app não abrir.
+
+Em Ajustes há uma linha de diagnóstico com a memória do aparelho, os núcleos, os
+modelos ligados e a etapa em que a última queda aconteceu. **É o que o piloto deve
+copiar ao relatar uma queda.**
 
 ## Limitações da plataforma (iPhone)
 

@@ -97,16 +97,18 @@ test("a faixa da câmera pode encolher de verdade", () => {
     "use minmax(0, 1fr) na faixa da câmera, não 1fr cru");
 });
 
-test("os controles que o app.js procura existem no HTML", () => {
-  // O app quebra inteiro num `null.addEventListener`, e o testador só vê um
-  // app que não reage a nada.
-  const obrigatorios = [
-    "camera", "overlay", "toggle", "descrever", "lerTexto", "status", "fala",
-    "navBarra", "ir", "pararRota", "destino", "campoDestino", "formDestino",
-    "ditar", "cancelarDestino", "navDestino", "navRestante",
-    "chkAberto", "chkNuvem", "campoChaveGoogle", "campoEndpointNuvem",
-    "contaVocabulario", "chkPiso", "chkValidando", "selVerbosidade", "selModelo",
-  ];
-  const faltando = obrigatorios.filter((id) => !html.includes(`id="${id}"`));
-  assert.deepEqual(faltando, [], `ids ausentes no index.html: ${faltando.join(", ")}`);
+test("todo id que o app.js procura existe no HTML", () => {
+  // A lista sai do próprio app.js, não de uma cópia escrita à mão aqui: lista
+  // copiada envelhece calada, e o que ela deixaria passar é um
+  // `null.addEventListener` que mata o módulo inteiro na carga. O testador não
+  // vê erro nenhum — vê um app que não reage a nada.
+  const app = readFileSync(
+    fileURLToPath(new URL("../app.js", import.meta.url)), "utf8");
+  const procurados = [...new Set(
+    [...app.matchAll(/\$\(\s*"([^"]+)"\s*\)/g)].map((m) => m[1]))];
+
+  assert.ok(procurados.length > 20, "não consegui extrair os ids do app.js");
+  const faltando = procurados.filter((id) => !html.includes(`id="${id}"`));
+  assert.deepEqual(faltando, [],
+    `o app.js procura ids que não existem no index.html: ${faltando.join(", ")}`);
 });

@@ -124,7 +124,10 @@ const POR_CONSULTA = new Map();
 for (const item of VOCABULARIO) for (const c of item.consultas) POR_CONSULTA.set(c, item);
 
 /** O piso entra em toda passada; o resto se reveza. */
-export function montarConsultas(rodada = 0, maxConsultas = 16) {
+// Dez e não dezesseis: cada consulta é uma passagem a mais pelo modelo, e num
+// celular de 4 GB a diferença entre dez e dezesseis é a diferença entre
+// devolver uma resposta e o navegador matar a aba.
+export function montarConsultas(rodada = 0, maxConsultas = 10) {
   const piso = VOCABULARIO.filter((v) => v.grupo === Grupo.PISO);
   const outros = VOCABULARIO.filter((v) => v.grupo !== Grupo.PISO);
   const sel = [...piso];
@@ -151,7 +154,11 @@ const canvas = document.createElement("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
 export class DetectorAberto {
-  constructor({ largura = 512 } = {}) {
+  // 384 em vez de 512: o custo do OWL-ViT cresce com o quadrado do lado, então
+  // essa redução corta ~44% da memória de ativação. A perda de acerto em
+  // objeto grande e perto — buraco, degrau, tapume — é pequena, e é desses
+  // que se trata aqui.
+  constructor({ largura = 384 } = {}) {
     this.largura = largura;
     this.pipe = null;
     this.ocupado = false;

@@ -1,7 +1,7 @@
 // Projeto Íris — cache para funcionar sem internet depois do primeiro uso.
 // Arquivos do app: rede primeiro (atualiza fácil durante os testes), cache se offline.
 // Modelos, bibliotecas e fonte: cache primeiro (são versões fixas e pesadas).
-const VERSION = "iris-0.8.2";
+const VERSION = "iris-0.9.0";
 const SHELL = [
   "./", "./index.html", "./app.js", "./core.js", "./vision.js", "./ocr.js", "./diario.js",
   "./fala.js", "./navegacao.js", "./rotas.js", "./posicao.js", "./aberto.js",
@@ -52,12 +52,27 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
+// Acima disto o arquivo passa direto, sem entrar no cache. Guardar um modelo
+// de centenas de megabytes estoura a cota do site e, quando a cota estoura, o
+// navegador apaga TUDO que é do domínio — inclusive os arquivos do app, que
+// são o que faz ele abrir sem internet. Perder o cache do modelo é baixar de
+// novo; perder o cache do app é o app não abrir.
+const MAX_CACHE_BYTES = 60 * 1024 * 1024;
+
 async function cacheFirst(req) {
   const cache = await caches.open(VERSION);
   const hit = await cache.match(req);
   if (hit) return hit;
   const res = await fetch(req);
-  if (res.ok || res.type === "opaque") cache.put(req, res.clone());
+  if (!res.ok && res.type !== "opaque") return res;
+
+  // `opaque` não deixa ler o tamanho: no fim das contas é mais seguro não
+  // guardar do que arriscar a cota com um arquivo de tamanho desconhecido.
+  const tamanho = Number(res.headers.get("content-length") ?? NaN);
+  const cabe = Number.isFinite(tamanho) && tamanho <= MAX_CACHE_BYTES;
+  if (cabe) {
+    cache.put(req, res.clone()).catch(() => { /* cota cheia: segue sem cache */ });
+  }
   return res;
 }
 

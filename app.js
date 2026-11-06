@@ -127,6 +127,89 @@ const prefs = Object.assign(
 );
 const salvarPrefs = () => { try { localStorage.setItem(PREFS, JSON.stringify(prefs)); } catch { /* modo privado */ } };
 
+// ---------------- Guarda de queda ----------------
+// Quando o navegador mata a aba por falta de memória, nenhum código nosso
+// roda: não há evento, não há erro, não há log. O app simplesmente deixa de
+// existir. O único rastro possível é deixar uma marca ANTES e apagá-la na
+// saída limpa — se na abertura seguinte a marca ainda estiver lá, a sessão
+// anterior não terminou por vontade própria.
+//
+// Sem isto, a pessoa reabre o app com as mesmas opções pesadas ligadas e ele
+// cai de novo, e de novo, sem nunca dizer por quê. Com isto, ele volta leve e
+// diz o que desligou — que é o mínimo devido a quem depende dele para andar.
+
+const MARCA = "iris.sessao.v1";
+
+/** Quanta memória o aparelho declara. Chrome responde; Safari não. */
+const MEMORIA_GB = navigator.deviceMemory ?? null;
+const MEMORIA_MIN_ABERTO = 4;   // abaixo disso o OWL-ViT derruba a aba
+
+function marcarAtivo(etapa) {
+  try {
+    localStorage.setItem(MARCA, JSON.stringify({
+      etapa, ts: Date.now(), versao: document.querySelector('meta[name="iris-versao"]')?.content,
+      modelo: prefs.modelo, piso: prefs.piso, aberto: prefs.aberto, memoriaGB: MEMORIA_GB,
+    }));
+  } catch { /* modo privado: seguimos sem a guarda */ }
+}
+
+function limparMarca() {
+  try { localStorage.removeItem(MARCA); } catch { /* nada a fazer */ }
+}
+
+/** Lê e consome a marca. Null quando a sessão anterior terminou limpa. */
+function consumirMarca() {
+  try {
+    const m = JSON.parse(localStorage.getItem(MARCA) ?? "null");
+    limparMarca();
+    return m;
+  } catch { limparMarca(); return null; }
+}
+
+/**
+ * Desliga o que mais pesava e devolve a frase a dizer, ou null.
+ * A escolha do que desligar segue o custo: o vocabulário aberto é de longe o
+ * mais caro, o piso vem depois, e só em último caso mexemos no detector — sem
+ * ele o app não serve para nada.
+ */
+function recuperarDeQueda(m) {
+  if (!m) return null;
+
+  // Desligamos o que estava ligado NA HORA DA QUEDA, que é o que a marca
+  // guardou — e não o que está ligado agora. São a mesma coisa quase sempre,
+  // mas quando não são, desligar pelo estado atual dá uma frase que mente
+  // sobre o que aconteceu.
+  let desligado = null;
+  if (m.aberto) {
+    prefs.aberto = false;
+    desligado = "o reconhecimento ampliado";
+  } else if (m.piso) {
+    prefs.piso = false;
+    desligado = "o aviso de calçada e degrau";
+  } else if (m.modelo && m.modelo !== "lite0") {
+    prefs.modelo = "lite0";
+    desligado = "a precisão alta do reconhecimento";
+  }
+
+  if (!desligado) {
+    // Já estava no mínimo e caiu assim mesmo. Não há o que desligar, e fingir
+    // que resolvemos alguma coisa seria pior do que dizer a verdade.
+    return "O aplicativo foi encerrado pelo celular na sessão anterior, e ele já "
+      + "estava na configuração mais leve. Feche os outros aplicativos antes de usar "
+      + "o Íris, e avise no diário do piloto.";
+  }
+
+  salvarPrefs();
+  return "O aplicativo foi encerrado pelo celular na sessão anterior, por falta de "
+    + `memória. Desliguei ${desligado} para ele voltar a funcionar. `
+    + "Você pode ligar de novo nos ajustes, se quiser tentar.";
+}
+
+const marcaAnterior = consumirMarca();
+// A fala precisa de um toque do usuário para sair no celular, então o aviso
+// espera o primeiro toque. Na tela ele aparece de imediato.
+const avisoDeQueda = recuperarDeQueda(marcaAnterior);
+
 // ---------------- Voz ----------------
 let ptVoice = null;
 function pickVoice() {
@@ -368,6 +451,7 @@ async function start() {
   }
 
   diario.iniciar({ piso: prefs.piso, validando: prefs.validando });
+  marcarAtivo("deteccao");
   barramento.publicar(Evento.SESSAO_INICIOU, { modelo: prefs.modelo, piso: prefs.piso });
   await requestWakeLock();
   setState("ativo", "Percepção ativa");
@@ -387,6 +471,7 @@ async function iniciarPiso() {
       console.warn("Modelo de piso indisponível", e);
       diario.falha("carregar_piso", e);
       pisoEl.textContent = "Piso indisponível";
+      marcarAtivo("deteccao");
       return;
     }
   }
@@ -475,6 +560,7 @@ function stop(announce = true) {
   varreduraTimer = 0;
   riscosAbertos = [];
   fila.reset();
+  limparMarca();          // saída limpa: a próxima abertura não acusa queda
   setState("parado", "Parado. Toque em Iniciar para começar.");
   if (announce && wasActive) {
     speak("Percepção parada.", true);
@@ -672,8 +758,33 @@ async function concluirDescricao(quadros) {
 
 const VALIDADE_RISCO_MS = 6000;   // buraco não anda, mas a câmera vira
 
+/** O aparelho aguenta carregar o modelo de vocabulário aberto? */
+function memoriaBastaParaAberto() {
+  if (MEMORIA_GB === null) return true;      // navegador não conta: deixamos tentar
+  return MEMORIA_GB >= MEMORIA_MIN_ABERTO;
+}
+
 async function varrerVocabularioAberto({ descricao = false } = {}) {
   if (!prefs.aberto || state !== "ativo") return null;
+  if (!memoriaBastaParaAberto()) {
+    prefs.aberto = false;
+    salvarPrefs();
+    if (chkAberto) chkAberto.checked = false;
+    dizer(`Este aparelho tem ${MEMORIA_GB} gigabytes de memória, e o reconhecimento `
+      + "ampliado precisa de pelo menos quatro. Desliguei para o aplicativo não cair.",
+      Canal.SISTEMA, { interrompe: true });
+    return null;
+  }
+
+  // A marca diz ao próximo início o que estava acontecendo, caso o navegador
+  // mate a aba durante a carga — que é o momento de maior consumo.
+  marcarAtivo("vocabulario");
+  // Enquanto a varredura roda, o laço de quadros para. São dois modelos na
+  // memória ao mesmo tempo; manter o detector rápido girando a 12 qps em cima
+  // disso é o que estoura o aparelho.
+  const estavaRodando = rafId !== 0;
+  if (estavaRodando) { cancelAnimationFrame(rafId); rafId = 0; }
+
   try {
     if (!detectorAberto.pronto) {
       mostrar("Preparando o reconhecimento ampliado (uma vez só).", "info");
@@ -684,7 +795,8 @@ async function varrerVocabularioAberto({ descricao = false } = {}) {
 
     riscosAbertos = r.deteccoes;
     riscosAteMs = performance.now() + VALIDADE_RISCO_MS;
-    diario.metrica({ varreduraMs: r.ms, riscos: r.deteccoes.length });
+    diario.alerta({ text: `[varredura ${r.ms} ms, ${r.deteccoes.length} riscos]`,
+      tipo: "varredura", priority: Priority.BAIXA });
 
     // Risco de via vira dado georreferenciado para quem quiser integrar —
     // sem imagem nenhuma junto, por princípio.
@@ -705,6 +817,9 @@ async function varrerVocabularioAberto({ descricao = false } = {}) {
   } catch (e) {
     diario.falha("vocabulario-aberto", e);
     return null;
+  } finally {
+    marcarAtivo("deteccao");
+    if (estavaRodando && state === "ativo" && rafId === 0) rafId = requestAnimationFrame(tick);
   }
 }
 
@@ -1044,13 +1159,28 @@ function atualizarResumo() {
 }
 
 // ---------------- Eventos ----------------
-btnToggle.addEventListener("click", () => (state === "parado" ? start() : stop()));
+// O aviso de queda espera o primeiro toque, porque voz sem gesto do usuário
+// não sai no celular. Na tela ele já apareceu assim que o app abriu.
+let quedaPorDizer = avisoDeQueda;
+btnToggle.addEventListener("click", () => {
+  if (quedaPorDizer) {
+    unlockAudio();
+    speak(quedaPorDizer, true);
+    quedaPorDizer = null;
+    return;                      // este toque é só para ouvir o aviso
+  }
+  return state === "parado" ? start() : stop();
+});
 btnDescrever.addEventListener("click", describe);
 btnLerTexto.addEventListener("click", lerTexto);
 $("errou").addEventListener("click", () => relatar(TipoErro.FALSO_POSITIVO, "Aviso errado marcado."));
 $("perdeu").addEventListener("click", () => relatar(TipoErro.NAO_AVISOU, "Obstáculo não avisado, marcado."));
 
-$("abrirAjustes").addEventListener("click", () => { atualizarResumo(); dlgAjustes.showModal(); });
+$("abrirAjustes").addEventListener("click", () => {
+  atualizarResumo();
+  atualizarDiagMemoria();
+  dlgAjustes.showModal();
+});
 
 // ---------------- Eventos da navegação ----------------
 nuvem.endpoint = prefs.endpointNuvem;
@@ -1097,6 +1227,14 @@ document.body.dataset.validando = String(prefs.validando);
 
 chkPiso.addEventListener("change", () => {
   prefs.piso = chkPiso.checked;
+  if (prefs.piso && prefs.aberto) {
+    prefs.aberto = false;
+    chkAberto.checked = false;
+    clearInterval(varreduraTimer); varreduraTimer = 0;
+    riscosAbertos = []; detectorAberto.descarregar();
+    speak("Desliguei o reconhecimento ampliado: ele e o aviso de calçada não cabem "
+      + "juntos na memória do celular.", true);
+  }
   salvarPrefs();
   if (!prefs.piso) { clearInterval(segTimer); segTimer = 0; pisoEl.textContent = ""; pisoAtual = null; }
   else if (state === "ativo") iniciarPiso();
@@ -1147,15 +1285,41 @@ $("contaVocabulario").textContent =
   `${VOCABULARIO.length} tipos de obstáculo e risco que o detector comum não conhece.`;
 
 chkAberto.addEventListener("change", () => {
-  prefs.aberto = chkAberto.checked;
-  salvarPrefs();
-  if (!prefs.aberto) {
+  if (!chkAberto.checked) {
+    prefs.aberto = false;
+    salvarPrefs();
     clearInterval(varreduraTimer); varreduraTimer = 0;
     riscosAbertos = []; detectorAberto.descarregar();
     speak("Reconhecimento ampliado desligado.", true);
-  } else {
-    speak("Reconhecimento ampliado ligado. O modelo baixa na primeira vez que você pedir uma descrição.", true);
+    return;
   }
+
+  // Aparelho pequeno demais: recusamos antes de baixar 90 MB para depois
+  // derrubar a aba. Dizer não agora é melhor do que falhar depois.
+  if (!memoriaBastaParaAberto()) {
+    chkAberto.checked = false;
+    prefs.aberto = false;
+    salvarPrefs();
+    speak(`Este aparelho declara ${MEMORIA_GB} gigabytes de memória. O reconhecimento `
+      + "ampliado precisa de pelo menos quatro e derrubaria o aplicativo. Mantive desligado.", true);
+    return;
+  }
+
+  // Três modelos ao mesmo tempo é o que mata a aba. O piso e o ampliado
+  // disputam a mesma memória, então um desliga o outro.
+  let avisoPiso = "";
+  if (prefs.piso) {
+    prefs.piso = false;
+    chkPiso.checked = false;
+    clearInterval(segTimer); segTimer = 0;
+    pisoEl.textContent = ""; pisoAtual = null;
+    avisoPiso = " Desliguei o aviso de calçada, porque os dois juntos não cabem na memória do celular.";
+  }
+
+  prefs.aberto = true;
+  salvarPrefs();
+  speak("Reconhecimento ampliado ligado. O modelo baixa na primeira vez que você pedir "
+    + "uma descrição; use rede sem fio." + avisoPiso, true);
 });
 
 campoChave.addEventListener("change", () => {
@@ -1210,6 +1374,30 @@ $("limparDiario").addEventListener("click", () => {
 });
 
 atualizarResumo();
+
+// ---------------- Diagnóstico de memória ----------------
+// A queda por memória é invisível para quem está testando: a aba some e volta
+// uma página de erro do navegador. Esta linha, nos ajustes, é o que permite ao
+// piloto relatar o que aconteceu em vez de dizer só "caiu".
+function atualizarDiagMemoria() {
+  const partes = [];
+  partes.push(MEMORIA_GB !== null
+    ? `Memória declarada pelo aparelho: ${MEMORIA_GB} GB.`
+    : "O navegador não informa a memória do aparelho.");
+  partes.push(`Núcleos: ${navigator.hardwareConcurrency ?? "?"}.`);
+  const pesados = [prefs.modelo === "lite2" && "precisão alta",
+    prefs.piso && "calçada", prefs.aberto && "ampliado"].filter(Boolean);
+  partes.push(`Modelos ligados: ${pesados.length ? pesados.join(", ") : "só o básico"}.`);
+  if (marcaAnterior) {
+    partes.push(`A sessão anterior foi encerrada pelo navegador durante `
+      + `"${marcaAnterior.etapa}" — quase sempre falta de memória.`);
+  }
+  $("diagMemoria").textContent = partes.join(" ");
+}
+atualizarDiagMemoria();
+
+// O aviso de queda aparece na tela antes de qualquer toque.
+if (avisoDeQueda) mostrar("O aplicativo caiu na sessão anterior", "alta", avisoDeQueda);
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("./sw.js").catch((e) => console.warn("Service worker não registrado", e));
