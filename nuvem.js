@@ -90,7 +90,16 @@ export class DescritorNaNuvem {
       if (r.status === 429) throw new Error("O serviço de descrição está ocupado. Tente em instantes.");
       if (!r.ok) throw new Error("O serviço de descrição não respondeu.");
 
-      const j = await r.json();
+      // Quando o proxy não está instalado, o nginx devolve a própria página do
+      // app com status 200. Sem esta checagem, o erro que chega ao usuário é
+      // um "JSON inválido" que não ajuda ninguém a entender o que fazer.
+      const tipo = r.headers.get("content-type") ?? "";
+      if (!tipo.includes("application/json")) {
+        throw new Error("A descrição detalhada não está instalada neste servidor. "
+          + "Sigo com o que o aparelho enxerga sozinho.");
+      }
+
+      const j = await r.json().catch(() => null);
       if (!j?.texto) throw new Error("A descrição voltou vazia.");
 
       this.ultimoMs = Math.round(performance.now() - t0);
