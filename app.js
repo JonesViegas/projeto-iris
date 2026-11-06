@@ -6,11 +6,29 @@
 import {
   analyzeSpatial, AlertEngine, describeScene, Priority, Proximity, NOMES,
   MotionTracker, corDoSemaforo, analisarPiso, obstaculosDoPiso, avisoDePiso,
-  Narrador, Verbosidade, associarCortantes,
+  Narrador, Verbosidade, associarCortantes, registrarClasses, numero,
 } from "./core.js";
 import { amostrarSemaforo, Segmentador } from "./vision.js";
 import { Leitor } from "./ocr.js";
 import { Diario, TipoErro } from "./diario.js";
+import { Canal, FilaDeFala, Fraseador, EstadoDaCena, NarracaoDeAmbiente } from "./fala.js";
+import { Navegador, referenciaNoLado, distanciaFalada } from "./navegacao.js";
+import { tracarRota } from "./rotas.js";
+import { RastreadorDePosicao, Bussola, ditarDestino } from "./posicao.js";
+import {
+  DetectorAberto, nomesDoVocabulario, rotulosDeRisco, ALTURAS_ABERTAS, VOCABULARIO,
+} from "./aberto.js";
+import { DescritorNaNuvem, contextoLocal, AVISO_DE_CONSENTIMENTO } from "./nuvem.js";
+import { barramento, Evento, registroDeRisco, buscarEmProvedores } from "./integracao.js";
+
+// As classes de vocabulário aberto passam a existir para todo o núcleo:
+// ganham nome flexionado, altura para a estimativa de distância e, as de
+// risco alto, direito a alerta falado na hora.
+registrarClasses({
+  nomes: nomesDoVocabulario(),
+  alturas: ALTURAS_ABERTAS,
+  alerta: [...rotulosDeRisco()],
+});
 
 const MP_VERSION = "0.10.14";
 const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
@@ -67,12 +85,44 @@ const segmentador = new Segmentador();
 const leitor = new Leitor();
 const diario = new Diario();
 
+// A fila é a única porta de saída da voz. Antes, alerta, narração e descrição
+// chamavam speak() direto e brigavam entre si; agora cada um oferece a sua
+// frase e a fila decide quem fala, quem espera e quem é engolido.
+const fila = new FilaDeFala();
+const fraseador = new Fraseador();
+const estadoCena = new EstadoDaCena();
+// A política de narração mora em fala.js, não aqui: ela precisa rodar sem
+// navegador, no `node --test` e no simulador.
+const ambiente = new NarracaoDeAmbiente(narrador, { fraseador, estado: estadoCena });
+
+// Navegação a pé
+const navegador = new Navegador();
+const rastreador = new RastreadorDePosicao({
+  aoMover: (p) => aoMoverPosicao(p),
+  aoFalhar: (e) => { dizer(e.message, Canal.SISTEMA, { chave: "nav:gps-erro" }); },
+});
+const bussola = new Bussola();
+let rotaAtual = null;
+let destinoAtual = "";
+let recalculando = false;
+
+// Vocabulário aberto e descrição na nuvem
+const detectorAberto = new DetectorAberto();
+const nuvem = new DescritorNaNuvem();
+let varreduraTimer = 0;
+let riscosAbertos = [];          // detecções abertas ainda válidas
+let riscosAteMs = 0;
+
 // ---------------- Preferências ----------------
-const PREFS = "iris.prefs.v2";   // v2 reseta todo mundo para o padrão leve
+const PREFS = "iris.prefs.v3";   // v3 acrescenta navegação, vocabulário e nuvem
 const prefs = Object.assign(
   // Padrão leve: três modelos de IA ao mesmo tempo estouravam a memória do
   // Safari e o app era encerrado. Piso e Lite2 ficam como opção consciente.
-  { piso: false, validando: false, verbosidade: Verbosidade.NORMAL, modelo: "lite0" },
+  // A nuvem nasce desligada por princípio, não por desempenho.
+  {
+    piso: false, validando: false, verbosidade: Verbosidade.NORMAL, modelo: "lite0",
+    aberto: false, chaveGoogle: "", nuvemLigada: false, endpointNuvem: "/api/descrever",
+  },
   (() => { try { return JSON.parse(localStorage.getItem(PREFS) ?? "{}"); } catch { return {}; } })()
 );
 const salvarPrefs = () => { try { localStorage.setItem(PREFS, JSON.stringify(prefs)); } catch { /* modo privado */ } };
@@ -147,6 +197,37 @@ function speak(text, interrupt) {
     emitir();
   }
 }
+
+// ---------------- Arbitragem da fala ----------------
+// Nada no app chama speak() direto a partir daqui. Tudo oferece à fila, e a
+// fila decide. É o que impede o alerta de obstáculo de ser atropelado por uma
+// narração de banco de praça, e o que impede o app de repetir a mesma frase
+// seis vezes enquanto a cena não muda.
+
+function dizer(texto, canal = Canal.NARRACAO, extra = {}) {
+  if (!texto) return false;
+  const entrou = fila.oferecer({ texto, canal, ...extra }, performance.now());
+  if (entrou) bombearFala();
+  return entrou;
+}
+
+const NIVEL_DO_CANAL = {
+  [Canal.ALERTA]: "alta", [Canal.NAVEGACAO]: "nav", [Canal.SISTEMA]: "info",
+  [Canal.DESCRICAO]: "info", [Canal.NARRACAO]: "info",
+};
+
+function bombearFala() {
+  const s = window.speechSynthesis;
+  const ocupada = Boolean(s?.speaking || s?.pending);
+  const saida = fila.proxima(performance.now(), ocupada);
+  if (!saida) return;
+  speak(saida.texto, saida.interromper);
+  mostrar(saida.texto, NIVEL_DO_CANAL[saida.canal] ?? "info");
+}
+
+// A navegação fala mesmo com a câmera desligada, então a fila não pode
+// depender do laço de quadros para escoar.
+setInterval(bombearFala, 350);
 
 /** Teste de voz sob toque do usuário: a prova definitiva no aparelho. */
 function testarVoz() {
@@ -268,17 +349,26 @@ async function start() {
 
   alerts.reset();
   motion.reset();
-  narrador.reset();
+  ambiente.reset();
+  fila.reset();
   describeLeft = 0;
   describeBuffer = [];
   lastFrameAt = 0;
   fps = 0;
   pisoAtual = null;
   pisoAnterior = null;
+  riscosAbertos = [];
+  riscosAteMs = 0;
   ultimoAvisoPiso.clear();
   segIntervaloAtual = SEG_INTERVALO_MS;
 
+  // Já em rota quando a câmera liga: volta a varrer o chão à frente.
+  if (prefs.aberto && navegador.ativo && !varreduraTimer) {
+    varreduraTimer = setInterval(() => varrerVocabularioAberto(), VARREDURA_NAV_MS);
+  }
+
   diario.iniciar({ piso: prefs.piso, validando: prefs.validando });
+  barramento.publicar(Evento.SESSAO_INICIOU, { modelo: prefs.modelo, piso: prefs.piso });
   await requestWakeLock();
   setState("ativo", "Percepção ativa");
   speak("Percepção iniciada.", true);
@@ -331,9 +421,12 @@ async function lacoPiso() {
     if (aviso && aviso.priority !== Priority.BAIXA && podeAvisarPiso(`piso:${novo.nome}`)) {
       const alta = aviso.priority === Priority.ALTA;
       signal(alta);
-      speak(aviso.text, alta);
-      mostrar(aviso.text, alta ? "alta" : "info");
+      // Pisar na via é alerta: entra pelo mesmo canal do obstáculo e cala o
+      // que estivesse sendo narrado.
+      if (alta) fila.calarAbaixoDe(Canal.ALERTA);
+      dizer(aviso.text, Canal.ALERTA, { chave: `piso:${novo.nome}`, urgente: alta });
       diario.alerta({ text: aviso.text, priority: aviso.priority, key: `piso:${novo.nome}` });
+      barramento.publicar(Evento.PISO, { nome: novo.nome, seguro: novo.seguro, texto: aviso.text });
     }
   }
 
@@ -342,8 +435,8 @@ async function lacoPiso() {
     if (!podeAvisarPiso(`obs:${obs.nome}`)) continue;
     const texto = `Atenção, ${obs.nome} à frente.`;
     signal(true);
-    speak(texto, true);
-    mostrar(texto, "alta");
+    fila.calarAbaixoDe(Canal.ALERTA);
+    dizer(texto, Canal.ALERTA, { chave: `obs:${obs.nome}`, urgente: true });
     diario.obstaculo(obs);
     diario.alerta({ text: texto, priority: Priority.ALTA, key: `obs:${obs.nome}` });
     break; // um aviso por ciclo: falar dois obstáculos juntos não ajuda ninguém
@@ -375,8 +468,18 @@ function stop(announce = true) {
   metricsEl.textContent = "";
   pisoEl.textContent = "";
   if (wasActive) { diario.encerrar(); atualizarResumo(); }
+  // A varredura do vocabulário aberto depende da câmera; a rota, não. Quem
+  // está a caminho continua sendo guiado com a câmera desligada — é assim que
+  // a bateria dura a caminhada inteira.
+  clearInterval(varreduraTimer);
+  varreduraTimer = 0;
+  riscosAbertos = [];
+  fila.reset();
   setState("parado", "Parado. Toque em Iniciar para começar.");
-  if (announce && wasActive) speak("Percepção parada.", true);
+  if (announce && wasActive) {
+    speak("Percepção parada.", true);
+    barramento.publicar(Evento.SESSAO_TERMINOU, {});
+  }
 }
 
 // ---------------- Laço de detecção ----------------
@@ -387,6 +490,7 @@ function tick(now) {
   if (now - lastFrameAt >= 1000 / MAX_FPS && video.readyState >= 2) {
     try { processFrame(now); } catch (e) { console.error("Falha no quadro", e); diario.falha("quadro", e); }
   }
+  bombearFala();
   rafId = requestAnimationFrame(tick);
 }
 
@@ -416,7 +520,14 @@ function processFrame(now) {
     }];
   });
 
-  let objects = analyzeSpatial(detections);
+  // O vocabulário aberto é lento demais para o laço de quadros, mas o que ele
+  // achou segundos atrás continua valendo: buraco não anda. Juntamos as duas
+  // fontes aqui e o resto do pipeline não precisa saber a diferença.
+  const comAberto = riscosAbertos.length && ts < riscosAteMs
+    ? [...detections, ...riscosAbertos]
+    : detections;
+
+  let objects = analyzeSpatial(comAberto);
   objects = motion.update(objects, ts);
   objects = associarCortantes(objects);   // faca na mão herda a distância da pessoa
 
@@ -428,34 +539,36 @@ function processFrame(now) {
   }
   ultimosObjetos = objects;
 
+  // A cena é observada em todo quadro, inclusive nos que viram alerta: é
+  // assim que o app sabe quando a cena voltou a ficar parada.
+  const mudanca = ambiente.observar(objects, ts);
+
   const alert = alerts.process(objects, ts);
   if (alert) {
     const high = alert.priority === Priority.ALTA;
-    signal(high);
-    speak(alert.text, high);
-    mostrar(alert.text, high ? "alta" : "info");
-    diario.alerta(alert);
-  } else if (describeLeft === 0 && !lendoTexto) {
-    // sem perigo a anunciar: conta o que apareceu e o que está acontecendo
-    const ev = narrador.evento(objects, ts, prefs.verbosidade);
-    if (ev) {
-      speak(ev.text, false);          // nunca interrompe um alerta em curso
-      mostrar(ev.text, "info");
-      diario.alerta({ ...ev, priority: Priority.BAIXA });
+    // O bipe só acompanha uma fala que vai mesmo sair. Bipar sem falar deixa a
+    // pessoa parada procurando um aviso que nunca veio.
+    if (dizer(alert.text, Canal.ALERTA, { chave: alert.key, urgente: high })) {
+      signal(high);
+      fila.calarAbaixoDe(Canal.ALERTA);   // o que ia ser dito agora virou ruído
+      diario.alerta(alert);
+      barramento.publicar(Evento.ALERTA, { texto: alert.text, prioridade: alert.priority });
     }
+  } else if (describeLeft === 0 && !lendoTexto) {
+    narrarAmbiente(objects, ts, mudanca);
   }
 
   if (describeLeft > 0) {
     describeBuffer.push(objects);
     describeLeft--;
     if (describeLeft === 0) {
-      let text = describeScene(describeBuffer);
-      if (pisoAtual) text = `Você está em ${pisoAtual.nome}. ${text}`;
+      const quadros = describeBuffer;
       describeBuffer = [];
-      speak(text, true);
-      mostrar("Descrição do ambiente", "info", text);
-      diario.descricao(text);
-      btnDescrever.querySelector(".rotulo").textContent = "O que tem aqui?";
+      concluirDescricao(quadros).catch((e) => {
+        diario.falha("descricao", e);
+        dizer(e?.message ?? "Não consegui descrever.", Canal.SISTEMA, { interrompe: true });
+        btnDescrever.querySelector(".rotulo").textContent = "O que tem aqui?";
+      });
     }
   }
 
@@ -472,12 +585,127 @@ function processFrame(now) {
   draw(objects, w, h);
 }
 
+// ---------------- Narração do ambiente ----------------
+// O que mudou entre a versão anterior e esta: antes, cada objeto novo virava
+// uma frase, uma por vez, a cada 1,1 s. Com quatro coisas na calçada o app
+// gastava cinco segundos recitando lista e, no fim, repetia a primeira. Agora
+// a cena parada é silêncio e as novidades saem juntas, numa frase só.
+
+function narrarAmbiente(objects, ts, mudanca) {
+  const fala = ambiente.proxima(objects, ts, prefs.verbosidade, mudanca);
+  if (!fala) return;
+  // Confirmamos só depois de a fila aceitar: uma frase recusada tem de poder
+  // voltar a ser novidade, senão o objeto nasce calado para sempre.
+  if (dizer(fala.texto, Canal.NARRACAO, { chave: fala.eventos.map((e) => e.chave).join("+") })) {
+    ambiente.confirmar(fala.eventos, ts);
+    diario.alerta({ text: fala.texto, tipo: "ambiente", priority: Priority.BAIXA });
+  }
+}
+
 function describe() {
   if (state !== "ativo") { unlockAudio(); speak("Inicie a percepção primeiro.", true); return; }
   signal(false); // confirma o toque
   describeBuffer = [];
   describeLeft = DESCRIBE_FRAMES;
   btnDescrever.querySelector(".rotulo").textContent = "Olhando…";
+}
+
+/**
+ * A descrição tem três camadas, da mais barata para a mais cara, e cada uma
+ * só entra se a anterior não bastar e se o usuário tiver escolhido pagá-la:
+ *
+ *   1. Local, instantânea — o que o detector já viu nos últimos quadros.
+ *   2. Vocabulário aberto, uns segundos — buraco, degrau, tapume, piso tátil,
+ *      porta, escada: o que o COCO não conhece. Continua no aparelho.
+ *   3. Nuvem, se ligada — a leitura da cena como um todo, com o arranjo das
+ *      coisas e o texto das placas. Única que manda imagem para fora.
+ */
+async function concluirDescricao(quadros) {
+  const rotulo = btnDescrever.querySelector(".rotulo");
+  const contexto = contextoLocal({
+    objetos: ultimosObjetos,
+    piso: pisoAtual?.nome ?? null,
+    navegando: navegador.ativo ? rotaAtual?.destino?.nome ?? null : null,
+  });
+
+  // Camada 3 primeiro, quando ligada: ela substitui as outras, não soma.
+  // Duas descrições da mesma cena, uma atrás da outra, é o oposto do que se
+  // quer de um app que já fala demais.
+  if (prefs.nuvemLigada && nuvem.configurado) {
+    rotulo.textContent = "Enviando…";
+    mostrar("Enviando uma foto para a descrição detalhada…", "info");
+    try {
+      const { texto, ms } = await nuvem.descrever(video, contexto);
+      rotulo.textContent = "O que tem aqui?";
+      dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 20000 });
+      mostrar("Descrição detalhada", "info", texto);
+      diario.descricao(texto);
+      barramento.publicar(Evento.DESCRICAO, { texto, origem: "nuvem", ms });
+      return;
+    } catch (e) {
+      // Falhou a nuvem? Não deixamos quem perguntou sem resposta: cai para o
+      // que o aparelho sabe, e diz por quê em uma frase.
+      mostrar(e.message, "info");
+      diario.falha("nuvem", e);
+    }
+  }
+
+  let texto = describeScene(quadros);
+  if (pisoAtual) texto = `Você está em ${pisoAtual.nome}. ${texto}`;
+
+  if (prefs.aberto) {
+    rotulo.textContent = "Olhando melhor…";
+    const extra = await varrerVocabularioAberto({ descricao: true });
+    if (extra) texto = `${texto} ${extra}`;
+  }
+
+  rotulo.textContent = "O que tem aqui?";
+  dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 15000 });
+  mostrar("Descrição do ambiente", "info", texto);
+  diario.descricao(texto);
+  barramento.publicar(Evento.DESCRICAO, { texto, origem: "local" });
+}
+
+// ---------------- Vocabulário aberto ----------------
+// Caro demais para o laço de quadros (1 a 4 s por passada), então roda sob
+// demanda e, durante a navegação, em varreduras espaçadas do chão à frente.
+
+const VALIDADE_RISCO_MS = 6000;   // buraco não anda, mas a câmera vira
+
+async function varrerVocabularioAberto({ descricao = false } = {}) {
+  if (!prefs.aberto || state !== "ativo") return null;
+  try {
+    if (!detectorAberto.pronto) {
+      mostrar("Preparando o reconhecimento ampliado (uma vez só).", "info");
+      await detectorAberto.carregar();
+    }
+    const r = await detectorAberto.varrer(video);
+    if (!r) return null;
+
+    riscosAbertos = r.deteccoes;
+    riscosAteMs = performance.now() + VALIDADE_RISCO_MS;
+    diario.metrica({ varreduraMs: r.ms, riscos: r.deteccoes.length });
+
+    // Risco de via vira dado georreferenciado para quem quiser integrar —
+    // sem imagem nenhuma junto, por princípio.
+    const pos = rastreador.ultima;
+    for (const d of r.deteccoes) {
+      if (d.risco !== "alto") continue;
+      barramento.publicar(Evento.RISCO_ABERTO, registroDeRisco({
+        classe: d.pt, confianca: d.score, posicao: pos, metros: null,
+      }));
+    }
+
+    if (!descricao || r.deteccoes.length === 0) return null;
+    const porNome = new Map();
+    for (const d of r.deteccoes) porNome.set(d.pt, (porNome.get(d.pt) ?? 0) + 1);
+    const itens = [...porNome.entries()].slice(0, 4)
+      .map(([nome, n]) => (n === 1 ? nome : `${numero(n, false)} ${nome}`));
+    return `No chão e em volta: ${itens.join(", ")}.`;
+  } catch (e) {
+    diario.falha("vocabulario-aberto", e);
+    return null;
+  }
 }
 
 // ---------------- Leitura de texto ----------------
@@ -598,6 +826,156 @@ function draw(objects, vw, vh) {
   }
 }
 
+// ---------------- Navegação a pé ----------------
+// Funciona com a câmera ligada ou desligada. Com a câmera ligada, as duas se
+// somam: a rota diz para onde ir, a câmera diz o que há no caminho — e quando
+// a câmera reconhece um semáforo ou um poste do lado da manobra, a instrução
+// ganha uma referência que a pessoa consegue confirmar com a bengala.
+
+const navBarra = $("navBarra");
+const navDestinoEl = $("navDestino");
+const navRestanteEl = $("navRestante");
+const btnIr = $("ir");
+const btnPararRota = $("pararRota");
+const dlgDestino = $("destino");
+const campoDestino = $("campoDestino");
+const VARREDURA_NAV_MS = 9000;
+
+function atualizarPainelNav() {
+  const ativo = navegador.ativo;
+  document.body.dataset.navegando = String(ativo);
+  if (!ativo) { navDestinoEl.textContent = ""; navRestanteEl.textContent = ""; return; }
+  navDestinoEl.textContent = rotaAtual?.destino?.nome ?? destinoAtual;
+  const falta = navegador.restanteM(rastreador.ultima);
+  navRestanteEl.textContent = falta != null ? distanciaFalada(falta) : "";
+}
+
+async function iniciarNavegacao(texto) {
+  const destino = String(texto ?? "").trim();
+  if (!destino) return;
+  destinoAtual = destino;
+
+  unlockAudio();
+  dizer(`Procurando o caminho até ${destino}.`, Canal.SISTEMA, { interrompe: true });
+
+  // A bússola só pode ser pedida dentro de um gesto do usuário no iPhone.
+  // Este caminho começa no toque do botão, então é aqui que se pede.
+  bussola.iniciar().then((ok) => {
+    if (!ok) dizer(
+      "Sem bússola neste aparelho. Vou indicar os rumos pelo norte, e os lados só quando você estiver andando.",
+      Canal.SISTEMA, { chave: "nav:sem-bussola" });
+  });
+
+  try {
+    const origem = await rastreador.umaVez();
+    rastreador.iniciar();
+
+    // Um provedor registrado (Lumiar, por exemplo) responde antes do
+    // buscador genérico: ele sabe coisas que o mapa não sabe.
+    const doProvedor = (await buscarEmProvedores(destino, origem))[0];
+    const alvo = doProvedor
+      ? { nome: doProvedor.nome, lat: doProvedor.lat, lng: doProvedor.lng }
+      : destino;
+
+    rotaAtual = await tracarRota({
+      chaveGoogle: prefs.chaveGoogle, origem, destino: alvo, posicaoAtual: origem,
+    });
+
+    // Uma frase só. A fila guarda uma fala pendente por canal, então oferecer
+    // duas seguidas no canal do sistema faria a segunda apagar a primeira —
+    // e o aviso de qualidade da rota é informação que não pode sumir.
+    const recados = [rotaAtual.avisoDeQualidade, doProvedor?.acessibilidade].filter(Boolean);
+    if (recados.length) dizer(recados.join(" "), Canal.SISTEMA, { chave: "nav:recados" });
+
+    const inicio = navegador.iniciar(rotaAtual);
+    dizer(inicio.texto, Canal.NAVEGACAO, { chave: inicio.chave, validadeMs: 20000 });
+    atualizarPainelNav();
+    signal(false);
+
+    diario.alerta({ text: inicio.texto, tipo: "nav-inicio", priority: Priority.MEDIA });
+    barramento.publicar(Evento.NAV_INICIOU, {
+      destino: rotaAtual.destino.nome, metros: rotaAtual.distanciaM, provedor: rotaAtual.provedor,
+    });
+
+    // Durante o deslocamento, o chão à frente passa a ser varrido de tempos em
+    // tempos: é andando que se cai num buraco, não parado olhando a cena.
+    if (prefs.aberto && state === "ativo") {
+      clearInterval(varreduraTimer);
+      varreduraTimer = setInterval(() => varrerVocabularioAberto(), VARREDURA_NAV_MS);
+    }
+  } catch (e) {
+    rotaAtual = null;
+    rastreador.parar();
+    const msg = e?.message ?? "Não consegui traçar a rota.";
+    dizer(msg, Canal.SISTEMA, { interrompe: true });
+    diario.falha("rota", e);
+    atualizarPainelNav();
+  }
+}
+
+function pararNavegacao(anunciar = true) {
+  const estava = navegador.ativo;
+  navegador.parar();
+  rastreador.parar();
+  bussola.parar();
+  clearInterval(varreduraTimer);
+  varreduraTimer = 0;
+  rotaAtual = null;
+  recalculando = false;
+  atualizarPainelNav();
+  if (estava && anunciar) dizer("Rota encerrada.", Canal.SISTEMA, { interrompe: true });
+}
+
+function aoMoverPosicao(p) {
+  if (!navegador.ativo) return;
+  const eventos = navegador.atualizar(p, bussola.disponivel ? bussola.graus : null, performance.now());
+
+  for (const ev of eventos) {
+    if (ev.recalcular) { recalcularRota(); continue; }
+
+    let texto = ev.texto;
+    // A câmera dá o que o mapa não tem: um ponto que se confirma com a bengala.
+    if (ev.tipo === "manobra" && state === "ativo") {
+      const lado = /esquerda/.test(texto) ? "à esquerda" : /direita/.test(texto) ? "à direita" : null;
+      const ref = lado && referenciaNoLado(ultimosObjetos, lado, NOMES);
+      if (ref) texto = texto.replace(/\.$/, `, logo depois do ${ref}.`);
+    }
+
+    if (ev.urgente) signal(ev.tipo === "travessia");
+    dizer(texto, Canal.NAVEGACAO, { chave: ev.chave, urgente: ev.urgente });
+    diario.alerta({ text: texto, tipo: `nav-${ev.tipo}`, priority: Priority.MEDIA });
+
+    if (ev.tipo === "chegada") {
+      barramento.publicar(Evento.NAV_CHEGOU, { destino: rotaAtual?.destino?.nome });
+      setTimeout(() => pararNavegacao(false), 1200);
+    } else if (ev.tipo === "manobra" || ev.tipo === "travessia") {
+      barramento.publicar(Evento.NAV_MANOBRA, { texto, tipo: ev.tipo });
+    }
+  }
+  atualizarPainelNav();
+}
+
+async function recalcularRota() {
+  if (recalculando || !destinoAtual) return;
+  recalculando = true;
+  barramento.publicar(Evento.NAV_FORA_DE_ROTA, { destino: destinoAtual });
+  try {
+    const origem = rastreador.ultima ?? await rastreador.umaVez();
+    rotaAtual = await tracarRota({
+      chaveGoogle: prefs.chaveGoogle, origem,
+      destino: rotaAtual.destino, posicaoAtual: origem,   // já é ponto: não busca de novo
+    });
+    const inicio = navegador.iniciar(rotaAtual);
+    dizer(inicio.texto, Canal.NAVEGACAO, { chave: `recalc:${Date.now()}`, validadeMs: 20000 });
+  } catch (e) {
+    diario.falha("recalculo", e);
+    dizer("Não consegui recalcular agora. Siga com cuidado e eu tento de novo.",
+      Canal.SISTEMA, { chave: "nav:recalc-falhou" });
+  } finally {
+    recalculando = false;
+  }
+}
+
 // ---------------- Tela sempre ligada ----------------
 async function requestWakeLock() {
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch { wakeLock = null; }
@@ -655,6 +1033,7 @@ function relatar(tipo, confirmacao) {
   signal(false);
   speak(confirmacao, true);
   atualizarResumo();
+  barramento.publicar(Evento.ERRO_MARCADO, { tipo, contexto: contexto() });
 }
 
 function atualizarResumo() {
@@ -672,6 +1051,43 @@ $("errou").addEventListener("click", () => relatar(TipoErro.FALSO_POSITIVO, "Avi
 $("perdeu").addEventListener("click", () => relatar(TipoErro.NAO_AVISOU, "Obstáculo não avisado, marcado."));
 
 $("abrirAjustes").addEventListener("click", () => { atualizarResumo(); dlgAjustes.showModal(); });
+
+// ---------------- Eventos da navegação ----------------
+nuvem.endpoint = prefs.endpointNuvem;
+atualizarPainelNav();
+
+btnIr.addEventListener("click", () => {
+  unlockAudio();
+  campoDestino.value = "";
+  dlgDestino.showModal();
+  // Dar o foco ao campo faz o leitor de tela anunciar o rótulo e abre o
+  // teclado: sem isso, quem usa VoiceOver fica procurando onde digitar.
+  setTimeout(() => campoDestino.focus(), 120);
+});
+
+$("formDestino").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const texto = campoDestino.value;
+  dlgDestino.close();
+  iniciarNavegacao(texto);
+});
+
+// Sem type="button" o Cancelar também é submit, e cancelar viraria "ir".
+$("cancelarDestino").addEventListener("click", () => dlgDestino.close());
+
+$("ditar").addEventListener("click", () => {
+  mostrar("Escutando o destino…", "info");
+  ditarDestino({
+    aoOuvir: (texto) => {
+      campoDestino.value = texto;
+      mostrar(`Entendi: ${texto}`, "info");
+      speak(`Entendi ${texto}. Toque em traçar rota para confirmar.`, true);
+    },
+    aoFalhar: (err) => { mostrar(err.message, "info"); speak(err.message, true); },
+  });
+});
+
+btnPararRota.addEventListener("click", () => pararNavegacao(true));
 
 const chkPiso = $("chkPiso");
 const chkValidando = $("chkValidando");
@@ -694,7 +1110,7 @@ selModelo.value = prefs.modelo;
 selVerbosidade.addEventListener("change", () => {
   prefs.verbosidade = Number(selVerbosidade.value);
   salvarPrefs();
-  narrador.reset();
+  ambiente.reset();
   const nomes = ["Só perigos.", "Perigos e objetos em volta.", "Tudo o que reconhecer."];
   speak(nomes[prefs.verbosidade] ?? "Ajustado.", true);
 });
@@ -715,6 +1131,68 @@ chkValidando.addEventListener("change", () => {
   salvarPrefs();
   document.body.dataset.validando = String(prefs.validando);
   speak(prefs.validando ? "Modo validação ligado." : "Modo validação desligado.", true);
+});
+
+// ---------------- Ajustes novos ----------------
+const chkAberto = $("chkAberto");
+const chkNuvem = $("chkNuvem");
+const campoChave = $("campoChaveGoogle");
+const campoEndpoint = $("campoEndpointNuvem");
+
+chkAberto.checked = prefs.aberto;
+chkNuvem.checked = prefs.nuvemLigada;
+campoChave.value = prefs.chaveGoogle;
+campoEndpoint.value = prefs.endpointNuvem;
+$("contaVocabulario").textContent =
+  `${VOCABULARIO.length} tipos de obstáculo e risco que o detector comum não conhece.`;
+
+chkAberto.addEventListener("change", () => {
+  prefs.aberto = chkAberto.checked;
+  salvarPrefs();
+  if (!prefs.aberto) {
+    clearInterval(varreduraTimer); varreduraTimer = 0;
+    riscosAbertos = []; detectorAberto.descarregar();
+    speak("Reconhecimento ampliado desligado.", true);
+  } else {
+    speak("Reconhecimento ampliado ligado. O modelo baixa na primeira vez que você pedir uma descrição.", true);
+  }
+});
+
+campoChave.addEventListener("change", () => {
+  prefs.chaveGoogle = campoChave.value.trim();
+  salvarPrefs();
+  speak(prefs.chaveGoogle
+    ? "Chave do Google Maps salva."
+    : "Chave removida. A navegação vai usar o OpenStreetMap.", true);
+});
+
+campoEndpoint.addEventListener("change", () => {
+  prefs.endpointNuvem = campoEndpoint.value.trim();
+  nuvem.endpoint = prefs.endpointNuvem;
+  salvarPrefs();
+});
+
+// Consentimento em dois toques, com o aviso FALADO. Quem não enxerga não lê
+// o rótulo da chave nem o termo de uso; um toque acidental não pode começar a
+// mandar fotos do que a pessoa aponta para um servidor.
+let consentimentoAte = 0;
+chkNuvem.addEventListener("change", () => {
+  if (!chkNuvem.checked) {
+    prefs.nuvemLigada = false; salvarPrefs();
+    speak("Descrição detalhada desligada. Nenhuma imagem sai do aparelho.", true);
+    return;
+  }
+  const agora = Date.now();
+  if (agora < consentimentoAte) {
+    prefs.nuvemLigada = true; salvarPrefs();
+    consentimentoAte = 0;
+    speak("Descrição detalhada ligada. A partir de agora, o botão O que tem aqui envia uma foto.", true);
+    return;
+  }
+  chkNuvem.checked = false;          // ainda não: primeiro o aviso
+  consentimentoAte = agora + 30000;
+  speak(AVISO_DE_CONSENTIMENTO, true);
+  mostrar("Toque de novo para confirmar a descrição detalhada.", "texto", AVISO_DE_CONSENTIMENTO);
 });
 
 $("testarVoz").addEventListener("click", testarVoz);

@@ -12,6 +12,7 @@ import {
   analyzeSpatial, MotionTracker, AlertEngine, Narrador, Verbosidade,
   associarCortantes, Priority, ALTURA_REAL_M, FOV_VERTICAL_RAD,
 } from "../core.js";
+import { Canal, FilaDeFala, NarracaoDeAmbiente } from "../fala.js";
 
 const FPS = 12;
 const PASSO_MS = 1000 / FPS;
@@ -100,12 +101,27 @@ const CENARIOS = {
 };
 
 // ---------------- Execução ----------------
-function rodar(nome, verbosidade = Verbosidade.NORMAL) {
+// Dois modos, de propósito. `--antigo` reproduz a política da versão 0.7, em
+// que alerta e narração chamavam a voz direto; o modo normal roda a política
+// atual, com fila de prioridade e narração agregada. Rodar os dois lado a
+// lado é a forma de ver se uma mudança de política calou o que importava ou
+// só calou o barulho.
+
+function rodar(nome, { verbosidade = Verbosidade.NORMAL, antigo = false } = {}) {
   const c = CENARIOS[nome];
   const motion = new MotionTracker();
   const alerts = new AlertEngine();
   const narrador = new Narrador();
+  const ambiente = new NarracaoDeAmbiente(narrador);
+  const fila = new FilaDeFala();
   const falas = [];
+
+  // A voz do aparelho não é instantânea: enquanto ela fala, a fila segura o
+  // resto. Sem modelar isso, o simulador aprovaria políticas que na prática
+  // atropelam a própria voz. ~16 caracteres por segundo é a taxa da voz
+  // pt-BR do sistema a 1,1 de velocidade.
+  let falandoAte = 0;
+  const duracaoDaFala = (t) => 350 + (t.length / 16) * 1000;
 
   const quadros = Math.round(c.duracaoS * FPS);
   for (let i = 0; i < quadros; i++) {
@@ -121,15 +137,52 @@ function rodar(nome, verbosidade = Verbosidade.NORMAL) {
       if (orig?.cor) o.cor = orig.cor;
     }
 
+    if (antigo) {
+      const a = alerts.process(objs, ts);
+      if (a) { falas.push({ t, text: a.text, tipo: "ALERTA", prio: a.priority }); continue; }
+      const ev = narrador.evento(objs, ts, verbosidade);
+      if (ev) falas.push({ t, text: ev.text, tipo: "narra", prio: Priority.BAIXA });
+      continue;
+    }
+
+    const mudanca = ambiente.observar(objs, ts);
     const a = alerts.process(objs, ts);
-    if (a) { falas.push({ t, text: a.text, tipo: "ALERTA", prio: a.priority }); continue; }
-    const ev = narrador.evento(objs, ts, verbosidade);
-    if (ev) falas.push({ t, text: ev.text, tipo: "narra", prio: Priority.BAIXA });
+    if (a) {
+      fila.calarAbaixoDe(Canal.ALERTA);
+      fila.oferecer({
+        texto: a.text, canal: Canal.ALERTA, chave: a.key,
+        urgente: a.priority === Priority.ALTA, prio: a.priority,
+      }, ts);
+    } else {
+      const fala = ambiente.proxima(objs, ts, verbosidade, mudanca);
+      if (fala) {
+        const entrou = fila.oferecer({
+          texto: fala.texto, canal: Canal.NARRACAO,
+          chave: fala.eventos.map((e) => e.chave).join("+"),
+        }, ts);
+        if (entrou) ambiente.confirmar(fala.eventos, ts);
+      }
+    }
+
+    const saida = fila.proxima(ts, ts < falandoAte);
+    if (saida) {
+      falandoAte = ts + duracaoDaFala(saida.texto);
+      falas.push({
+        t, text: saida.texto,
+        tipo: saida.canal === Canal.ALERTA ? "ALERTA" : "narra",
+        prio: saida.item.prio ?? Priority.BAIXA,
+      });
+    }
   }
 
   const PRIO = ["ALTA ", "MEDIA", "baixa"];
-  console.log(`\n${"=".repeat(74)}\n${c.titulo}\n  ${c.duracaoS}s a ${FPS} qps  ·  ${falas.length} falas  ·  ` +
-    `1 fala a cada ${(c.duracaoS / Math.max(1, falas.length)).toFixed(1)}s\n${"=".repeat(74)}`);
+  const marca = antigo ? "  [política 0.7]" : "";
+  console.log(`
+${"=".repeat(74)}
+${c.titulo}${marca}
+  ${c.duracaoS}s a ${FPS} qps  ·  ${falas.length} falas  ·  ` +
+    `1 fala a cada ${(c.duracaoS / Math.max(1, falas.length)).toFixed(1)}s
+${"=".repeat(74)}`);
   if (falas.length === 0) console.log("  (SILÊNCIO TOTAL)");
   for (const f of falas) {
     console.log(`  ${f.t.toFixed(1).padStart(5)}s  ${PRIO[f.prio]}  ${f.tipo === "ALERTA" ? "!" : " "} ${f.text}`);
@@ -137,11 +190,35 @@ function rodar(nome, verbosidade = Verbosidade.NORMAL) {
   return falas;
 }
 
-const alvo = process.argv[2];
+const args = process.argv.slice(2);
+const antigo = args.includes("--antigo");
+const comparar = args.includes("--comparar");
+const alvo = args.find((a) => !a.startsWith("--"));
 const nomes = alvo && CENARIOS[alvo] ? [alvo] : Object.keys(CENARIOS);
 if (alvo && !CENARIOS[alvo]) {
   console.error(`Cenário "${alvo}" não existe. Opções: ${Object.keys(CENARIOS).join(", ")}`);
   process.exit(1);
 }
-for (const n of nomes) rodar(n);
+
+if (comparar) {
+  console.log(`
+Comparando a política de fala da 0.7 com a atual.
+`);
+  const linhas = [];
+  for (const n of nomes) {
+    const velho = rodar(n, { antigo: true });
+    const novo = rodar(n);
+    linhas.push({ n, velho: velho.length, novo: novo.length });
+  }
+  console.log(`
+${"=".repeat(74)}
+Falas por cenário
+${"=".repeat(74)}`);
+  for (const l of linhas) {
+    const d = l.velho === 0 ? 0 : Math.round((1 - l.novo / l.velho) * 100);
+    console.log(`  ${l.n.padEnd(14)} 0.7: ${String(l.velho).padStart(3)}   atual: ${String(l.novo).padStart(3)}   ${d >= 0 ? "-" : "+"}${Math.abs(d)}%`);
+  }
+} else {
+  for (const n of nomes) rodar(n, { antigo });
+}
 console.log("");

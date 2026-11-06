@@ -1,0 +1,87 @@
+# Classes do detector de riscos do Íris, e os pisos que cada uma precisa bater
+# antes de ir a um usuário.
+#
+# Os pisos NÃO são iguais entre classes, de propósito. O que define o piso é a
+# consequência do erro, não a dificuldade da classe:
+#
+#   recall_perto  — fração dos casos de 0 a 4 m que o modelo encontra. É O
+#                   NÚMERO QUE MANDA: a 4 m, andando a 1,2 m/s, sobram três
+#                   segundos. Não achar é cair.
+#   precisao_min  — fração dos avisos que estão certos. Baixa demais e a pessoa
+#                   desliga o app; desligado, ele não avisa de nada.
+#
+# Bueiro aberto tem o piso de recall mais alto de todos (0.92) porque é o único
+# da lista em que a falha não é tropeço: é queda dentro de um buraco.
+
+versao: 1
+
+classes:
+  - id: 0
+    nome: buraco
+    pt: buraco
+    descricao: depressão no piso ou no asfalto fundo o bastante para torcer o pé
+    recall_perto: 0.88
+    precisao_min: 0.70
+    fontes: [RDD2022, roboflow-pothole, coleta-propria]
+
+  - id: 1
+    nome: bueiro_aberto
+    pt: bueiro aberto
+    descricao: boca de lobo ou poço de visita sem tampa, ou com tampa deslocada
+    recall_perto: 0.92
+    precisao_min: 0.60     # aqui aceitamos mais alarme falso: a queda é grave
+    fontes: [coleta-propria]
+
+  - id: 2
+    nome: degrau
+    pt: degrau
+    descricao: desnível isolado de 5 a 25 cm, inclusive meio-fio e soleira
+    recall_perto: 0.85
+    precisao_min: 0.72
+    fontes: [coleta-propria, roboflow-stairs]
+
+  - id: 3
+    nome: calcada_quebrada
+    pt: calçada quebrada
+    descricao: piso solto, levantado por raiz, ou faltando ladrilhos
+    recall_perto: 0.80
+    precisao_min: 0.70
+    fontes: [RDD2022, coleta-propria]
+
+  - id: 4
+    nome: tapume_obra
+    pt: tapume de obra
+    descricao: barreira de obra ocupando a calçada, com ou sem sinalização
+    recall_perto: 0.85
+    precisao_min: 0.80     # tapume é grande e distinto: exigimos precisão alta
+    fontes: [coleta-propria]
+
+  - id: 5
+    nome: piso_tatil
+    pt: piso tátil
+    descricao: faixa amarela de alerta ou direcional
+    recall_perto: 0.75     # não achar não machuca: é informação, não perigo
+    precisao_min: 0.85     # mas dizer que há quando não há desorienta
+    fontes: [coleta-propria]
+
+# Como a validação mede "perto"
+faixas_m:
+  perto: [0.0, 4.0]
+  medio: [4.0, 10.0]
+  longe: [10.0, 30.0]
+
+# Sem isto o treino vira decoreba: trinta fotos do mesmo buraco espalhadas entre
+# treino e validação dão mAP alto e modelo inútil.
+divisao:
+  por: local           # local | aleatorio — use "local" sempre
+  treino: 0.70
+  validacao: 0.15
+  teste: 0.15
+
+treino:
+  imgsz: 640
+  batch: 16
+  modelo_base: yolo11s.pt
+  epocas: 120
+  epocas_congeladas: 10
+  paciencia: 25

@@ -532,6 +532,21 @@ export class Narrador {
       this.#lembrar(objects, nowMs);
       return null;
     }
+    const escolhido = this.candidatos(objects, nowMs, nivel)[0];
+    if (!escolhido) return null;
+    this.confirmar([escolhido], nowMs);
+    return { text: escolhido.text, tipo: escolhido.tipo, key: escolhido.chave, priority: Priority.BAIXA };
+  }
+
+  /**
+   * Todos os eventos livres agora, sem marcar nada como falado.
+   * O app usa isto para juntar vários numa frase só: dizer "Pessoa à frente",
+   * "Carro à direita" e "Banco à esquerda" em três falas separadas consome
+   * seis segundos e soa a robô fazendo inventário. Quem chama confirma depois,
+   * com `confirmar()`, só o que virou voz de verdade.
+   */
+  candidatos(objects, nowMs, nivel = Verbosidade.NORMAL) {
+    if (nivel === Verbosidade.PERIGOS) return [];
 
     const candidatos = [];
     for (const o of objects) {
@@ -595,20 +610,24 @@ export class Narrador {
 
     this.#lembrar(objects, nowMs);
 
-    const livres = candidatos
+    return candidatos
       .filter((c) => {
         const ult = this.falado.get(c.chave);
         return ult === undefined || nowMs - ult >= this.cooldownMs;
       })
       .sort((a, b) => a.peso - b.peso);
+  }
 
-    const escolhido = livres[0];
-    if (!escolhido) return null;
-
-    this.falado.set(escolhido.chave, nowMs);
-    if (escolhido.tipo === "apareceu") this.anunciado.set(escolhido.alvo, nowMs);
-    this.ultimaFalaMs = nowMs;
-    return { text: escolhido.text, tipo: escolhido.tipo, key: escolhido.chave, priority: Priority.BAIXA };
+  /** Marca como falado o que de fato virou voz. */
+  confirmar(eventos, nowMs) {
+    let algum = false;
+    for (const e of eventos ?? []) {
+      if (!e) continue;
+      algum = true;
+      this.falado.set(e.chave, nowMs);
+      if (e.tipo === "apareceu" && e.alvo) this.anunciado.set(e.alvo, nowMs);
+    }
+    if (algum) this.ultimaFalaMs = nowMs;
   }
 
   #lembrar(objects, nowMs) {
@@ -676,4 +695,28 @@ export function associarCortantes(objects, cfgPerto = DIST_PERTO_M, cfgMedio = D
       approaching: o.approaching || dona.approaching,
     };
   });
+}
+
+// ============================================================
+// Classes vindas de fora do COCO
+// ============================================================
+// O detector rápido tem 80 classes fixas. O reconhecimento de vocabulário
+// aberto (aberto.js) produz classes em tempo de execução — buraco, bueiro,
+// piso tátil, tapume. Para que elas atravessem o pipeline inteiro (espacial,
+// distância, alerta, narração, descrição) sem tratamento especial em cada
+// etapa, basta registrá-las nas mesmas tabelas que as do COCO usam.
+//
+// Mutação de tabela em módulo não é bonito, mas a alternativa — passar as
+// tabelas como parâmetro por sete funções — espalharia o acoplamento por todo
+// o núcleo para servir a um único chamador.
+
+/**
+ * @param nomes   { label: { singular, plural, feminino } }
+ * @param alturas { label: metros } para a estimativa de distância
+ * @param alerta  lista de labels que merecem alerta falado na hora
+ */
+export function registrarClasses({ nomes = {}, alturas = {}, alerta = [] } = {}) {
+  Object.assign(NOMES, nomes);
+  Object.assign(ALTURA_REAL_M, alturas);
+  for (const l of alerta) ALERT_LABELS.add(l);
 }

@@ -1,13 +1,18 @@
 // Projeto Íris — cache para funcionar sem internet depois do primeiro uso.
 // Arquivos do app: rede primeiro (atualiza fácil durante os testes), cache se offline.
 // Modelos, bibliotecas e fonte: cache primeiro (são versões fixas e pesadas).
-const VERSION = "iris-0.7.0";
+const VERSION = "iris-0.8.0";
 const SHELL = [
   "./", "./index.html", "./app.js", "./core.js", "./vision.js", "./ocr.js", "./diario.js",
+  "./fala.js", "./navegacao.js", "./rotas.js", "./posicao.js", "./aberto.js",
+  "./nuvem.js", "./integracao.js",
   "./manifest.webmanifest",
   "./icons/iris-logo.svg", "./icons/icon-192.png", "./icons/icon-512.png",
   "./icons/icon-maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png",
 ];
+// Rota, geocodificação e descrição na nuvem NÃO entram em cache de propósito:
+// uma rota velha leva a pessoa para o lugar errado, e é pior do que não ter rota.
+// Por não estarem em nenhuma das duas listas, essas requisições passam direto.
 const PINNED_HOSTS = [
   "cdn.jsdelivr.net",        // MediaPipe tasks-vision e transformers.js
   "storage.googleapis.com",  // EfficientDet-Lite0

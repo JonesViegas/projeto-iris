@@ -23,6 +23,9 @@ próprio aparelho**: nenhuma imagem da câmera sai dele.
 | **Leitura de texto** (placas, letreiros) | Tesseract.js, português | ~7 MB no primeiro uso |
 | **Objeto pontiagudo junto a pessoa** | COCO (`knife`, `scissors`, `baseball bat`) | linguagem hedgeada, ver ressalva |
 | Descrição da cena | lógica própria | botão "O que tem aqui?" |
+| **Navegação a pé** | Google Maps, com OpenStreetMap de reserva | esquinas, metros e passos; ver ressalva |
+| **Vocabulário aberto** | OWL-ViT, via transformers.js | buraco, degrau, tapume, piso tátil: 30 tipos que o COCO não tem |
+| **Descrição detalhada** | modelo de visão-linguagem, por proxy | **opcional, desligada**, envia uma foto |
 | Diário do piloto | local, em JSON | para a validação com usuários |
 
 ### O que ainda **não** faz
@@ -32,9 +35,13 @@ trava isso no contrato. O app reconhece faca, tesoura e taco, e os anuncia como
 "objeto pontiagudo", nunca como arma. Um falso positivo aqui causa pânico e pode
 acusar alguém injustamente.
 
-**Buraco não é detectado.** Não existe no COCO nem no ADE20K, e exige modelo treinado
-especificamente — ver "Próximos passos". Até lá, o app não avisa buraco. Não prometa isso
-a quem for testar.
+**Buraco só é detectado com o reconhecimento ampliado ligado**, e com ressalva. O COCO
+e o ADE20K não têm a classe. O vocabulário aberto (Ajustes → "Reconhecimento ampliado")
+procura por buraco, bueiro aberto, degrau, tapume e mais 26 tipos usando descrição em
+texto, sem treino — mas leva de 1 a 4 segundos por varredura, então **não roda a cada
+quadro**: roda quando você pede a descrição e, durante a navegação, a cada 9 segundos.
+Ele erra mais que o detector rápido. Um detector próprio, treinado, é o caminho certo, e
+o pipeline para treiná-lo está em [`treino/`](treino/).
 
 ---
 
@@ -49,7 +56,146 @@ para longe é o erro perigoso. Medição real exigiria modelo de profundidade.
 **A cor do semáforo é informativa, nunca permissiva.** A câmera não sabe se está vendo o
 semáforo de pedestre ou o dos veículos. O app diz "semáforo verde à frente" e para por aí.
 
+**A navegação nunca manda atravessar.** Ao chegar numa travessia o app diz: *"Travessia
+bem à frente. Pare. Confirme o meio-fio com a bengala, escute o trânsito e atravesse
+quando você julgar seguro."* Ele não sabe se há carro vindo, e um erro aqui mata.
+
+**Sem bússola, o app não diz esquerda nem direita.** Um pedestre parado pode estar virado
+para qualquer lado; "vire à direita" dito sem saber o rumo dela manda a pessoa para a rua.
+Quando não há bússola nem movimento, o app fala em pontos cardeais ("siga para o norte") e
+avisa que não sabe o rumo. É menos confortável e nunca aponta para o lado errado.
+
+**O GPS urbano erra de 5 a 20 metros** — a largura de uma via. Por isso a manobra é
+avisada a 25 m e repetida a 8 m, e o app só recalcula depois de três leituras seguidas
+fora da rota: uma leitura só é quase sempre o sinal pulando entre prédios.
+
 ---
+
+---
+
+## Navegação a pé
+
+Toque em **Ir para…**, digite ou dite o destino. Pode ser endereço ("Rua Barão de Melgaço
+200") ou um lugar ("farmácia", "padaria mais perto").
+
+O que o app faz durante o percurso:
+
+- anuncia o trecho: *"Siga 180 metros pela Rua Barão de Melgaço, sentido leste."*
+- prepara a manobra a 25 m: *"Em 24 metros, uns 30 passos, vire à esquerda na Getúlio Vargas."*
+- manda executar a 8 m: *"Agora, vire à esquerda na Getúlio Vargas."*
+- com a câmera ligada, amarra a manobra ao mundo: *"…, logo depois do poste."*
+- em travessia, manda parar e devolve a decisão a quem está lá
+- ao chegar: *"Você chegou. A farmácia fica à sua direita."*
+
+**Metros e passos juntos.** Abaixo de 30 m o app dá os dois: *"24 metros, uns 30 passos"*.
+Quem fez orientação e mobilidade conta passos, e um número de passos é executável de
+imediato — "vinte e quatro metros" exige converter de cabeça enquanto se anda.
+
+### A chave do Google
+
+A navegação funciona **sem chave nenhuma**, pelo OpenStreetMap. Com chave do Google, o
+traçado a pé fica melhor nas cidades brasileiras e a busca por nome de estabelecimento
+passa a funcionar. Para ligar: Ajustes → "Chave do Google Maps".
+
+A chave precisa da **Maps JavaScript API** com faturamento ativo, e deve ser restringida
+por referenciador HTTP ao domínio do app — senão qualquer pessoa que leia o código-fonte
+do PWA usa a sua cota. Se o Google falhar ou a cota estourar, o app cai sozinho para o
+OpenStreetMap e **diz em voz alta** que mudou, porque a confiança no traçado muda junto.
+
+> O servidor público do OSRM, usado na reserva, é de demonstração: sem acordo de serviço
+> e limitado a uma requisição por segundo. Para uso de verdade, hospede o seu.
+
+---
+
+## Como o app decide o que falar
+
+Este é o coração da versão 0.8, e foi reescrito porque a versão anterior falava demais e
+sempre igual. Quem usa o app como visão não desliga o volume por ser chato — desliga
+porque cansa. E com o som desligado o app não avisa de nada.
+
+**Quatro canais, nesta ordem.** Obstáculo cala navegação, que cala resposta a toque, que
+cala narração do ambiente. Só obstáculo e manobra iminente atropelam uma frase em curso.
+
+**Informação estraga.** Cada fala tem prazo: um "vire à direita" que não saiu em 2,5 s é
+engolido, não dito com atraso — dito atrasado, ele manda a pessoa para a esquina errada.
+Um alerta de obstáculo vale 1,2 s.
+
+**Cena parada é silêncio.** Enquanto nada muda de verdade — classe, direção, faixa de
+distância, aproximação — o app não fala. A distância exata é ignorada na comparação de
+propósito: ela oscila sozinha e faria nada ser "parado".
+
+**Uma frase, vários objetos.** Em vez de *"Copo à frente."* … *"Celular à frente."* …
+*"Livro à esquerda."* … *"Garrafa à direita."* (quatro falas, oito segundos), o app diz:
+
+> À frente, um copo e um celular; à esquerda, um livro; à direita, uma garrafa.
+
+**A primeira menção é sempre canônica; a repetição é que varia.** Substantivo, direção,
+distância — sempre nessa ordem, na primeira vez, para a pessoa aprender o padrão e
+decodificar sem pensar. Da segunda em diante encurta e muda: *"Pessoa ainda à frente"*,
+*"Continua pessoa à frente, a dois metros"*. Variar a **primeira** menção seria confundir
+em nome da elegância.
+
+**Alerta não varia nunca.** A frase de perigo é fixa: *"Atenção, pessoa à frente, perto."*
+Ela precisa ser reconhecida antes de ser compreendida.
+
+---
+
+## Descrição detalhada (opcional, desligada)
+
+Com ela ligada, o botão "O que tem aqui?" manda **uma foto** a um modelo de visão e
+devolve algo de outra natureza:
+
+> Você está num balcão de atendimento. À sua frente, a uns três metros, há uma fila de
+> quatro pessoas que dobra à esquerda. O balcão fica no fundo, à direita, com uma placa
+> escrita "Senhas". Há cadeiras livres encostadas na parede à sua esquerda.
+
+**Nasce desligada e liga em dois toques.** No primeiro toque o app **fala** o aviso
+inteiro — quem não enxerga não lê letra miúda, e consentimento que a pessoa não ouviu não
+é consentimento. Só o segundo toque liga.
+
+**A chave da API não fica no app.** O PWA conversa com um proxy do próprio projeto, que
+guarda a chave no servidor — ver [`servidor/`](servidor/). Chave dentro de um PWA é
+chave pública.
+
+Todo o resto do app continua funcionando sem internet e sem mandar nada para lugar nenhum.
+
+---
+
+## Integração com o Lumiar
+
+`integracao.js` é a costura, e ela não manda nada para a rede por conta própria: publica
+eventos dentro do aparelho para quem se inscrever. Duas portas abertas:
+
+**Eventos** — sessão, alerta, piso, risco de via encontrado, manobra, chegada, erro
+marcado pelo testador. Um risco de via sai georreferenciado e **sem imagem**:
+
+```js
+{ classe: "bueiro aberto", confianca: 0.41, lat: -15.6, lng: -56.09,
+  precisaoM: 8, quando: "2026-11-06T13:02:11.000Z", origem: "iris-pwa" }
+```
+
+É a matéria-prima de um mapa colaborativo de calçadas — e a ausência da imagem é o que
+separa isso de uma câmera de vigilância.
+
+**Provedores de lugar** — quem registrar um provedor responde ao campo de destino **antes**
+do Google e do OpenStreetMap. Quando o Lumiar souber responder "Museu Rondon", a resposta
+dele vale mais, porque vem com o que interessa: entrada acessível, piso tátil, horário.
+
+```js
+import { registrarProvedorDeLugares, barramento, Evento } from "./integracao.js";
+
+registrarProvedorDeLugares({
+  nome: "lumiar",
+  async buscar(texto, posicao) {
+    return [{ nome: "Museu Rondon", lat: -15.61, lng: -56.07,
+              acessibilidade: "Entrada acessível pela lateral, com piso tátil." }];
+  },
+});
+
+barramento.em(Evento.RISCO_ABERTO, (r) => { /* seu destino */ });
+```
+
+O contrato completo, e o que um adaptador não pode fazer, estão no próprio arquivo.
 
 ## Arquivos
 
@@ -57,31 +203,55 @@ semáforo de pedestre ou o dos veículos. O app diz "semáforo verde à frente" 
 |---|---|
 | `index.html` | Interface (Atkinson Hyperlegible, feita para baixa visão) |
 | `app.js` | Câmera, laços de processamento, voz, bipe, tela sempre ligada |
-| `core.js` | **Lógica pura**: espacial, distância, alertas, piso, descrição. Sem navegador |
+| `core.js` | **Lógica pura**: espacial, distância, alertas, piso, descrição |
+| `fala.js` | **Lógica pura**: quem fala, quando cala, com que palavras |
+| `navegacao.js` | **Lógica pura**: geodésia, manobras, travessia, fora de rota |
+| `rotas.js` | Google Maps e OpenStreetMap, com uma saída só |
+| `posicao.js` | GPS, bússola e ditado do destino |
 | `vision.js` | Cor do semáforo e segmentação do piso |
+| `aberto.js` | Vocabulário aberto: 30 riscos que o COCO não conhece |
+| `nuvem.js` | Descrição detalhada opcional (fala com o proxy, nunca com a API) |
+| `integracao.js` | Costura para o Lumiar e outros: eventos e provedores de lugar |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
-| `test/core.test.mjs` | `node --test test/core.test.mjs` |
 
-Toda regra de decisão mora em `core.js`, sem dependência de navegador, e é testada.
+Toda regra de decisão mora em `core.js`, `fala.js` e `navegacao.js` — sem dependência de
+navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GPS e a rede.
 
 ---
 
 ## Rodar local
 
 ```bash
-node --test test/core.test.mjs    # 28 testes da lógica
-node test/simular.mjs             # simula cenários e imprime o que seria falado
-node test/simular.mjs faca        # um cenário só
+node --test test/core.test.mjs test/fala.test.mjs test/navegacao.test.mjs   # 62 testes
+node test/simular.mjs             # o que seria falado, cena a cena
+node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
+node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
+node test/simular-rota.mjs desvio # um cenário só
 npx serve .                       # http://localhost:3000
 ```
 
-O **simulador** alimenta o pipeline real (espacial → aproximação → cortantes →
-alertas → narrador) com cenas sintéticas a 12 qps e imprime a linha do tempo da
-fala. Ele valida a *política de fala*, não a qualidade do detector: as detecções
-ali são perfeitas, e na rua o EfficientDet erra. Quatro defeitos de fala foram
-encontrados por ele antes de chegarem ao usuário.
+### Os dois simuladores
+
+O **simulador de cena** alimenta o pipeline real (espacial → aproximação → cortantes →
+alertas → narrador → fila de fala) com cenas sintéticas a 12 qps e imprime a linha do
+tempo da fala, modelando inclusive o tempo que a voz do aparelho leva para dizer cada
+frase. `--comparar` mostra a mesma cena sob a política da 0.7 e sob a atual:
+
+```
+  calcada        0.7:   9   atual:   5   -44%
+  pequenos       0.7:   5   atual:   1   -80%
+```
+
+O **simulador de rota** faz uma pessoa andar a 1,2 m/s por uma rota sintética, com o erro
+de GPS da cidade, e imprime o que ela ouviria e em que metro. Três defeitos sérios foram
+achados por ele e corrigidos antes de qualquer teste na rua: a travessia sendo anunciada
+duas vezes (a segunda com a pessoa já no meio da rua), o "você saiu do caminho" repetindo
+a cada seis segundos para sempre, e 180 metros sendo falados como 200.
+
+Os dois validam a *política de fala*, não a qualidade do detector nem do traçado: as
+detecções e as rotas ali são perfeitas, e na rua não são.
 
 `localhost` é contexto seguro, então a câmera funciona sem HTTPS no Chrome e no Edge.
 Em qualquer outro endereço, **a câmera exige https**.
@@ -102,7 +272,8 @@ no mesmo padrão do Lumiar Cultural e do Guia. Vhost em `/etc/nginx/sites-availa
 Atualizar:
 
 ```bash
-tar czf - index.html app.js core.js vision.js ocr.js diario.js sw.js \
+tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
+    vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```
@@ -140,11 +311,20 @@ avisos falsos e obstáculos que passaram sem aviso. Teste também com o **VoiceO
 ## Próximos passos
 
 **Profundidade real** (Depth Anything V2) substituiria a estimativa por prior de tamanho —
-é o maior salto de qualidade disponível, e roda no navegador.
+é o maior salto de qualidade disponível, e roda no navegador. Vale mais do que qualquer
+outra coisa nesta lista: a distância é hoje o número mais frágil do app, e ela entra em
+toda decisão de alerta.
 
-**Buraco e piso irregular** exigem treino próprio: dataset rotulado (RDD2022, conjuntos do
-Roboflow), fine-tuning em GPU e validação separada antes de ir a usuário final. Não roda na
-micro2, que não tem GPU.
+**Detector próprio de riscos de calçada.** O vocabulário aberto já reconhece buraco,
+bueiro e degrau hoje, mas leva segundos por varredura. Um detector treinado rodaria a
+cada quadro. O pipeline completo está em [`treino/`](treino/): exportador do diário
+do piloto, preparação do dataset com divisão por local, treino em duas fases, validação
+por recall de perto e exportação para TFLite. Precisa de GPU e, sobretudo, de coleta —
+a micro2 não serve.
+
+**Busca de lugar por voz dentro da navegação**, para quem não quer digitar endereço.
+O ditado já existe no campo de destino; falta conversar ("a farmácia mais perto que
+esteja aberta agora").
 
 ---
 

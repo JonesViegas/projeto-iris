@@ -1,0 +1,17 @@
+{
+  "name": "iris-proxy-descricao",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Proxy que guarda a chave da API para a descrição detalhada do Projeto Íris",
+  "main": "proxy-descricao.mjs",
+  "scripts": {
+    "start": "node proxy-descricao.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

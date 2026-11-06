@@ -13,3 +13,17 @@ desktop.ini
 
 # nada de node aqui: o PWA é estático, sem build
 node_modules/
+
+# pipeline de treino: código entra, dado e peso não
+treino/.venv/
+treino/dados/
+treino/runs/
+treino/modelos/
+treino/*.csv
+treino/relatorio-piloto.md
+
+# proxy da descrição
+servidor/node_modules/
+servidor/package-lock.json
+*.env
+__pycache__/

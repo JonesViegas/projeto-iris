@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.7.0">
+<meta name="iris-versao" content="0.8.0">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -130,11 +130,46 @@
   }
   .fala[data-nivel="alta"] { border-left-color: var(--perto); background: rgba(120,16,12,.9); }
   .fala[data-nivel="texto"] { border-left-color: var(--ambar); }
+  .fala[data-nivel="nav"] { border-left-color: var(--violeta); background: rgba(46,22,92,.9); }
+  .fala[data-nivel="nav"] .alto { color: #C9B4FF; }
   .fala .alto { flex: none; color: var(--ciano-claro); }
   .fala[data-nivel="alta"] .alto { color: #FFB4AE; }
   .fala p { margin: 0; }
   .fala .extra { font-size: .82rem; opacity: .78; margin-top: 2px; }
   .fala .extra:empty { display: none; }
+
+  /* ---------- barra da rota ---------- */
+  .rota {
+    margin: 0 12px 8px; display: grid; gap: 8px; align-items: center;
+  }
+  body[data-navegando="true"] .rota { grid-template-columns: 1fr auto; }
+  .rota button {
+    border: 0; border-radius: 14px; min-height: 58px; cursor: pointer;
+    font: inherit; font-weight: 700; font-size: 1rem;
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+  }
+  #ir { background: rgba(107,63,212,.26); color: var(--ciano-claro);
+        border: 1px solid rgba(127,233,255,.3); width: 100%; }
+  #ir:active { transform: scale(.98); }
+  #pararRota { background: var(--parar); color: #FFF; padding: 0 16px; }
+  .rota-info { min-width: 0; line-height: 1.25; }
+  .rota-info b {
+    display: block; font-size: 1rem; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .rota-info span { display: block; font-size: .85rem; color: var(--ciano-claro); }
+  body[data-navegando="true"] #ir { display: none; }
+  body:not([data-navegando="true"]) .rota-info,
+  body:not([data-navegando="true"]) #pararRota { display: none; }
+
+  /* campos de texto dos ajustes e do destino */
+  .campo input[type="text"], .campo input[type="search"], .campo input[type="password"] {
+    font: inherit; font-weight: 400; font-size: 1.05rem; min-height: 54px;
+    border-radius: 12px; padding: 0 12px; color: var(--texto); width: 100%;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(127,233,255,.24);
+  }
+  .campo input:focus-visible { outline: 3px solid var(--foco); outline-offset: 2px; }
+  .dupla { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
   /* ---------- barra inferior ---------- */
   .barra {
@@ -248,6 +283,22 @@
     </span>
   </div>
 
+  <div class="rota" id="navBarra">
+    <button id="ir" type="button" aria-label="Traçar uma rota a pé até um destino">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z"/>
+        <circle cx="12" cy="10" r="2.6"/>
+      </svg>
+      Ir para…
+    </button>
+    <span class="rota-info">
+      <b id="navDestino"></b>
+      <span id="navRestante"></span>
+    </span>
+    <button id="pararRota" type="button" aria-label="Encerrar a rota">Parar rota</button>
+  </div>
+
   <main class="view">
     <video id="camera" playsinline muted autoplay aria-hidden="true"></video>
     <canvas class="overlay" id="overlay" aria-hidden="true"></canvas>
@@ -309,6 +360,32 @@
     </nav>
   </div>
 
+  <dialog id="destino" aria-labelledby="tituloDestino">
+    <form method="dialog" class="folha" id="formDestino">
+      <h2 id="tituloDestino">Para onde você vai?</h2>
+
+      <label class="campo">
+        Endereço ou lugar
+        <input type="text" id="campoDestino" name="destino" autocomplete="off"
+               autocapitalize="sentences" enterkeyhint="go"
+               placeholder="Rua, número, bairro — ou padaria, farmácia…">
+      </label>
+
+      <div class="dupla">
+        <button class="sec" id="ditar" type="button">Falar o destino</button>
+        <button class="sec fechar" type="submit">Traçar rota</button>
+      </div>
+
+      <p class="nota">
+        O guia a pé indica as esquinas, as distâncias em metros e em passos, e avisa
+        quando há travessia. Ele nunca diz que é seguro atravessar: quem decide a hora
+        de atravessar é você, com a bengala, o ouvido e o semáforo.
+      </p>
+
+      <button class="sec" id="cancelarDestino" type="button">Cancelar</button>
+    </form>
+  </dialog>
+
   <dialog id="ajustes" aria-labelledby="tituloAjustes">
     <form method="dialog" class="folha">
       <h2 id="tituloAjustes">Ajustes e validação</h2>
@@ -334,6 +411,30 @@
         <input type="checkbox" id="chkPiso">
         Avisar calçada, via, degrau e poste — baixa mais 4 MB e exige memória
       </label>
+      <label class="linha-check">
+        <input type="checkbox" id="chkAberto">
+        Reconhecimento ampliado — buraco, degrau, tapume, piso tátil, escada
+      </label>
+      <p class="nota" id="contaVocabulario"></p>
+
+      <label class="campo">
+        Chave do Google Maps (navegação a pé)
+        <input type="password" id="campoChaveGoogle" autocomplete="off" spellcheck="false"
+               placeholder="deixe vazio para usar o OpenStreetMap">
+      </label>
+
+      <label class="linha-check">
+        <input type="checkbox" id="chkNuvem">
+        Descrição detalhada — <b>envia uma foto pela internet</b> a cada toque em
+        “O que tem aqui?”
+      </label>
+
+      <label class="campo">
+        Endereço do serviço de descrição
+        <input type="text" id="campoEndpointNuvem" autocomplete="off" spellcheck="false"
+               placeholder="/api/descrever">
+      </label>
+
       <label class="linha-check">
         <input type="checkbox" id="chkValidando">
         Modo validação: botões para marcar erro

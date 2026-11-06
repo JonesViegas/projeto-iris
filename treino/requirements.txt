@@ -1,0 +1,13 @@
+# Pipeline de treino do Íris. Versões fixadas: treino que não reproduz não é
+# treino, é sorte.
+ultralytics==8.3.40
+torch==2.5.1
+torchvision==0.20.1
+PyYAML==6.0.2
+numpy==2.1.3
+opencv-python-headless==4.10.0.84
+
+# Só para exportar
+onnx==1.17.0
+onnxruntime==1.20.1
+tensorflow==2.18.0      # necessário para o .tflite
