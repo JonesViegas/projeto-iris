@@ -26,6 +26,8 @@ próprio aparelho**: nenhuma imagem da câmera sai dele.
 | **Navegação a pé** | Google Maps, com OpenStreetMap de reserva | esquinas, metros e passos; ver ressalva |
 | **Vocabulário aberto** | OWL-ViT, via transformers.js | buraco, degrau, tapume, piso tátil: 30 tipos que o COCO não tem |
 | **Descrição detalhada** | modelo de visão-linguagem, por proxy | **opcional, desligada**, envia uma foto |
+| **Onde estou?** | GPS + bússola + Nominatim + Overpass (OSM) | rua, rumo, referências com lado e passos, depois a câmera |
+| **Lugares familiares** | MobileNet-V3 (embeddings) + vizinhos mais próximos | aprende no aparelho com 8 quadros; guarda só vetores |
 | Diário do piloto | local, em JSON | para a validação com usuários |
 
 ### O que ainda **não** faz
@@ -70,6 +72,21 @@ avisada a 25 m e repetida a 8 m, e o app só recalcula depois de três leituras 
 fora da rota: uma leitura só é quase sempre o sinal pulando entre prédios.
 
 ---
+
+---
+
+## Onde estou? (0.10)
+
+Antes de guiar, situar. O botão **Onde estou?** diz a rua e o número aproximado, a confiança do
+GPS, para que lado a pessoa está virada e as referências em volta (ponto de ônibus, faixa com piso
+tátil, farmácia…) com lado e distância. Com a câmera ligada, emenda a descrição do que está à
+frente numa fala só. Sem bússola, usa pontos cardeais e diz isso.
+
+**Lugares familiares**: em Ajustes, dê um nome e toque em "Memorizar este lugar pela câmera". O app
+aprende com 8 quadros (vetores do MobileNet-V3, nunca a foto) e passa a dizer "Este lugar parece ser
+a cozinha" — inclusive onde não há GPS. Lugar memorizado com GPS bom vira destino: "Ir para casa".
+
+Arquitetura, decisões e próximas etapas de ML: [`docs/ROTEIRO-ML.md`](docs/ROTEIRO-ML.md).
 
 ---
 
@@ -212,6 +229,9 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `aberto.js` | Vocabulário aberto: 30 riscos que o COCO não conhece |
 | `nuvem.js` | Descrição detalhada opcional (fala com o proxy, nunca com a API) |
 | `integracao.js` | Costura para o Lumiar e outros: eventos e provedores de lugar |
+| `localizar.js` | **Lógica pura** do "Onde estou?": endereço, referências, direção relativa |
+| `lugares.js` | **Lógica pura** dos lugares familiares: aprender, reconhecer, esquecer |
+| `embedder.js` | Vetor de características do quadro (MediaPipe ImageEmbedder) |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
@@ -226,7 +246,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/*.test.mjs      # 68 testes: lógica, fala, navegação, layout e carga
+node --test test/*.test.mjs      # 89 testes: lógica, fala, navegação, layout e carga
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
@@ -276,6 +296,7 @@ Atualizar:
 ```bash
 tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
     vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
+    localizar.js lugares.js embedder.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```

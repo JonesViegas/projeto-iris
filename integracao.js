@@ -19,6 +19,7 @@ export const Evento = {
   SESSAO_TERMINOU: "sessao:terminou",
   ALERTA: "percepcao:alerta",
   DESCRICAO: "percepcao:descricao",
+  LOCALIZACAO: "percepcao:local",       // "onde estou?": endereço e referências, sem imagem
   PISO: "percepcao:piso",
   RISCO_ABERTO: "percepcao:risco",      // buraco, bueiro, tapume: o que vira dado público
   NAV_INICIOU: "nav:iniciou",

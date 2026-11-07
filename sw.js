@@ -1,11 +1,11 @@
 // Projeto Íris — cache para funcionar sem internet depois do primeiro uso.
 // Arquivos do app: rede primeiro (atualiza fácil durante os testes), cache se offline.
 // Modelos, bibliotecas e fonte: cache primeiro (são versões fixas e pesadas).
-const VERSION = "iris-0.9.0";
+const VERSION = "iris-0.10.0";
 const SHELL = [
   "./", "./index.html", "./app.js", "./core.js", "./vision.js", "./ocr.js", "./diario.js",
   "./fala.js", "./navegacao.js", "./rotas.js", "./posicao.js", "./aberto.js",
-  "./nuvem.js", "./integracao.js",
+  "./nuvem.js", "./integracao.js", "./localizar.js", "./lugares.js", "./embedder.js",
   "./manifest.webmanifest",
   "./icons/iris-logo.svg", "./icons/icon-192.png", "./icons/icon-512.png",
   "./icons/icon-maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png",

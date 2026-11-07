@@ -19,7 +19,12 @@ import {
   DetectorAberto, nomesDoVocabulario, rotulosDeRisco, ALTURAS_ABERTAS, VOCABULARIO,
 } from "./aberto.js";
 import { DescritorNaNuvem, contextoLocal, AVISO_DE_CONSENTIMENTO } from "./nuvem.js";
-import { barramento, Evento, registroDeRisco, buscarEmProvedores } from "./integracao.js";
+import {
+  barramento, Evento, registroDeRisco, buscarEmProvedores, registrarProvedorDeLugares,
+} from "./integracao.js";
+import { ondeEstou as consultarOndeEstou } from "./localizar.js";
+import { MemoriaDeLugares, ArmazemIndexedDB } from "./lugares.js";
+import { Embedder } from "./embedder.js";
 
 // As classes de vocabulário aberto passam a existir para todo o núcleo:
 // ganham nome flexionado, altura para a estimativa de distância e, as de
@@ -112,6 +117,17 @@ const nuvem = new DescritorNaNuvem();
 let varreduraTimer = 0;
 let riscosAbertos = [];          // detecções abertas ainda válidas
 let riscosAteMs = 0;
+
+// "Onde estou?" e lugares familiares
+const memoriaLugares = new MemoriaDeLugares({
+  armazem: typeof indexedDB !== "undefined" ? new ArmazemIndexedDB() : null,
+});
+const embedder = new Embedder();
+let localizando = false;
+let memorizando = false;
+// Quando o "Onde estou?" dispara a descrição, a frase do lugar abre a fala da
+// câmera — numa fala só, para a segunda não engolir a primeira na fila.
+let prefixoDescricao = null;
 
 // ---------------- Preferências ----------------
 const PREFS = "iris.prefs.v3";   // v3 acrescenta navegação, vocabulário e nuvem
@@ -712,7 +728,10 @@ async function concluirDescricao(quadros) {
     objetos: ultimosObjetos,
     piso: pisoAtual?.nome ?? null,
     navegando: navegador.ativo ? rotaAtual?.destino?.nome ?? null : null,
+    local: prefixoDescricao,
   });
+  const prefixo = prefixoDescricao ? `${prefixoDescricao} ` : "";
+  prefixoDescricao = null;
 
   // Camada 3 primeiro, quando ligada: ela substitui as outras, não soma.
   // Duas descrições da mesma cena, uma atrás da outra, é o oposto do que se
@@ -723,7 +742,7 @@ async function concluirDescricao(quadros) {
     try {
       const { texto, ms } = await nuvem.descrever(video, contexto);
       rotulo.textContent = "O que tem aqui?";
-      dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 20000 });
+      dizer(`${prefixo}${texto}`, Canal.DESCRICAO, { interrompe: true, validadeMs: 30000 });
       mostrar("Descrição detalhada", "info", texto);
       diario.descricao(texto);
       barramento.publicar(Evento.DESCRICAO, { texto, origem: "nuvem", ms });
@@ -746,7 +765,8 @@ async function concluirDescricao(quadros) {
   }
 
   rotulo.textContent = "O que tem aqui?";
-  dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 15000 });
+  texto = `${prefixo}${prefixo ? "Pela câmera: " : ""}${texto}`;
+  dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: prefixo ? 30000 : 15000 });
   mostrar("Descrição do ambiente", "info", texto);
   diario.descricao(texto);
   barramento.publicar(Evento.DESCRICAO, { texto, origem: "local" });
@@ -1180,6 +1200,112 @@ $("abrirAjustes").addEventListener("click", () => {
   atualizarResumo();
   atualizarDiagMemoria();
   dlgAjustes.showModal();
+});
+
+// ---------------- Onde estou? ----------------
+// Situa antes de guiar: rua, confiança do GPS, para onde a pessoa está
+// virada, referências do mapa com lado e distância e, com a câmera ligada,
+// o que está à frente. É a pergunta que vem antes de "como chego lá".
+
+async function reconhecerLugar(pos) {
+  if (state !== "ativo" || !memoriaLugares.tamanho) return null;
+  try {
+    const vetores = await embedder.varios(video, 3, 250);
+    return vetores.length ? memoriaLugares.reconhecerVarios(vetores, pos) : null;
+  } catch (e) {
+    diario.falha("lugares", e);
+    return null;
+  }
+}
+
+async function ondeEstou() {
+  if (localizando) return;
+  localizando = true;
+  unlockAudio();
+  signal(false);
+  dizer("Localizando você.", Canal.SISTEMA, { interrompe: true });
+  mostrar("Localizando…", "info");
+
+  try {
+    // Bússola (1,5 s de espera) e GPS em paralelo. A bússola precisa nascer
+    // dentro deste toque no iPhone, e é este o toque.
+    const [temBussola, posR] = await Promise.all([
+      bussola.iniciar().catch(() => false),
+      rastreador.umaVez().then((p) => ({ p }), (e) => ({ e })),
+    ]);
+    const pos = posR.p ?? null;
+    const familiar = await reconhecerLugar(pos);
+    const rumoPessoa = temBussola && bussola.graus != null ? bussola.graus : (pos?.rumoGraus ?? null);
+
+    let texto;
+    if (pos) {
+      const r = await consultarOndeEstou(pos, { rumoPessoa, familiar: familiar?.nome ?? null });
+      texto = r.texto;
+      barramento.publicar(Evento.LOCALIZACAO, {
+        endereco: r.endereco, referencias: r.referencias.map((x) => x.tipo),
+        familiar: familiar?.nome ?? null, precisaoM: pos.precisaoM ?? null,
+      });
+    } else {
+      // Sem GPS (dentro de casa, permissão negada) ainda pode haver o lugar
+      // reconhecido pela câmera — e é justamente o caso em que ele mais vale.
+      texto = [familiar ? `Este lugar parece ser ${familiar.nome}.` : null, posR.e?.message].filter(Boolean).join(" ");
+    }
+
+    if (state === "ativo") {
+      prefixoDescricao = texto;
+      describe();
+    } else {
+      const fim = " Para eu descrever o que está à sua frente, toque em Iniciar e aponte a câmera.";
+      dizer(texto + fim, Canal.DESCRICAO, { interrompe: true, validadeMs: 30000 });
+      mostrar("Onde estou", "info", texto);
+      diario.descricao(texto);
+    }
+  } catch (e) {
+    diario.falha("onde-estou", e);
+    dizer("Não consegui me localizar agora. Tente de novo em alguns segundos.", Canal.SISTEMA, { interrompe: true });
+  } finally {
+    localizando = false;
+  }
+}
+
+function atualizarListaLugares() {
+  const el = $("listaLugares");
+  if (!el) return;
+  const nomes = memoriaLugares.nomes();
+  el.textContent = nomes.length ? `Memorizados: ${nomes.join(", ")}.` : "Nenhum lugar memorizado ainda.";
+}
+
+async function memorizarLugar() {
+  const nome = ($("campoNomeLugar")?.value ?? "").trim();
+  unlockAudio();
+  if (!nome) { speak("Escreva ou dite o nome do lugar primeiro.", true); return; }
+  if (state !== "ativo") { speak("Inicie a câmera e aponte para o lugar.", true); return; }
+  if (memorizando) return;
+  memorizando = true;
+  try {
+    speak(`Memorizando ${nome}. Gire o celular devagar, de um lado para o outro.`, true);
+    const pos = await rastreador.umaVez().catch(() => null);
+    const vetores = await embedder.varios(video, 8, 400);
+    if (!vetores.length) throw new Error("a câmera não entregou imagem");
+    const total = await memoriaLugares.ensinar(nome, vetores, pos);
+    atualizarListaLugares();
+    speak(`Pronto. ${nome} memorizado, com ${total} vistas. Quanto mais vezes você memorizar, melhor eu reconheço.`, true);
+  } catch (e) {
+    diario.falha("lugares", e);
+    speak(`Não consegui memorizar: ${e.message}.`, true);
+  } finally {
+    memorizando = false;
+  }
+}
+
+registrarProvedorDeLugares(memoriaLugares.comoProvedor());
+memoriaLugares.carregar().then(atualizarListaLugares, () => {});
+$("ondeEstou").addEventListener("click", ondeEstou);
+$("memorizarLugar").addEventListener("click", memorizarLugar);
+$("esquecerLugares").addEventListener("click", async () => {
+  await memoriaLugares.esquecerTodos().catch(() => {});
+  atualizarListaLugares();
+  speak("Todos os lugares foram esquecidos.", true);
 });
 
 // ---------------- Eventos da navegação ----------------

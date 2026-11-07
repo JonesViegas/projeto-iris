@@ -120,7 +120,7 @@ export class DescritorNaNuvem {
  * Resumo do que o processamento local já apurou, para viajar junto com a foto.
  * Mantemos curto: é contexto, não transcrição.
  */
-export function contextoLocal({ objetos = [], piso = null, navegando = null }) {
+export function contextoLocal({ objetos = [], piso = null, navegando = null, local = null }) {
   return {
     objetos: objetos.slice(0, 8).map((o) => ({
       classe: o.detection?.label ?? o.label,
@@ -130,5 +130,8 @@ export function contextoLocal({ objetos = [], piso = null, navegando = null }) {
     })),
     piso,
     navegando,
+    // "Onde estou?": rua e referências do mapa, já em texto. Só coordenada
+    // virada palavra — a posição exata não viaja.
+    local: local ? String(local).slice(0, 600) : null,
   };
 }

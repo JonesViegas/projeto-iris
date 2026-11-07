@@ -72,6 +72,13 @@ function instrucaoDoContexto(ctx) {
   }
   if (ctx.piso) partes.push(`O piso logo à frente foi identificado como ${ctx.piso}.`);
   if (ctx.navegando) partes.push(`A pessoa está indo a pé para ${ctx.navegando}.`);
+  if (typeof ctx.local === "string" && ctx.local.trim()) {
+    // Vem do GPS e do mapa, já falado à pessoa. Serve para o modelo não
+    // contradizer a rua e para ligar o que vê às referências ("a farmácia à
+    // sua direita é a fachada verde"). Não repita o endereço na resposta.
+    partes.push(`Localização já informada à pessoa pelo GPS e pelo mapa: ${ctx.local.slice(0, 600)} `
+      + `Não repita essa informação; use-a só para relacionar o que você vê com essas referências.`);
+  }
   partes.push("Descreva o ambiente.");
   return partes.join(" ");
 }

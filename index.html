@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.9.0">
+<meta name="iris-versao" content="0.10.0">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -147,6 +147,7 @@
   .rota {
     margin: 0 12px 8px; display: grid; gap: 8px; align-items: center;
   }
+  body:not([data-navegando="true"]) .rota { grid-template-columns: 1fr 1fr; }
   body[data-navegando="true"] .rota { grid-template-columns: 1fr auto; }
   .rota button {
     border: 0; border-radius: 14px; min-height: 58px; cursor: pointer;
@@ -155,7 +156,13 @@
   }
   #ir { background: rgba(107,63,212,.26); color: var(--ciano-claro);
         border: 1px solid rgba(127,233,255,.3); width: 100%; }
-  #ir:active { transform: scale(.98); }
+  #ir:active, #ondeEstou:active { transform: scale(.98); }
+  #ondeEstou { background: rgba(127,233,255,.14); color: var(--ciano-claro);
+        border: 1px solid rgba(127,233,255,.3); width: 100%; }
+  body[data-navegando="true"] #ondeEstou { display: none; }
+  #blocoLugares { border: 1px solid rgba(127,233,255,.25); border-radius: 14px;
+        padding: 10px 12px; margin: 0 0 12px; }
+  #blocoLugares legend { padding: 0 6px; font-weight: 700; }
   #pararRota { background: var(--parar); color: #FFF; padding: 0 16px; }
   .rota-info { min-width: 0; line-height: 1.25; }
   .rota-info b {
@@ -303,6 +310,14 @@
       </svg>
       Ir para…
     </button>
+    <button id="ondeEstou" type="button" aria-label="Onde estou? Diz a rua, o rumo, as referências em volta e descreve o que a câmera vê">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.4"/>
+        <path d="M12 1.5v3"/><path d="M12 19.5v3"/><path d="M1.5 12h3"/><path d="M19.5 12h3"/>
+      </svg>
+      Onde estou?
+    </button>
     <span class="rota-info">
       <b id="navDestino"></b>
       <span id="navRestante"></span>
@@ -445,6 +460,18 @@
         <input type="text" id="campoEndpointNuvem" autocomplete="off" spellcheck="false"
                placeholder="/api/descrever">
       </label>
+
+      <fieldset class="campo" id="blocoLugares">
+        <legend>Lugares familiares — o app aprende a reconhecer</legend>
+        <label class="campo">
+          Nome do lugar (ex.: cozinha, portão de casa, ponto do trabalho)
+          <input type="text" id="campoNomeLugar" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="sec" id="memorizarLugar" type="button">Memorizar este lugar pela câmera</button>
+        <p class="nota" id="listaLugares"></p>
+        <button class="sec" id="esquecerLugares" type="button">Esquecer todos os lugares</button>
+        <p class="nota">Guarda só uma assinatura numérica de cada imagem, nunca a foto. Fica no aparelho.</p>
+      </fieldset>
 
       <label class="linha-check">
         <input type="checkbox" id="chkValidando">
