@@ -54,3 +54,37 @@ test("histórico: guarda poucos turnos, só texto, e expira", () => {
   assert.equal(c.ultimaFala, "r3");
   assert.deepEqual(c.historico(5000), [], "conversa parada há muito tempo recomeça");
 });
+
+// ---------------------------------------------------------------
+// Encerrar a conversa pela voz (0.13)
+// ---------------------------------------------------------------
+// O modo conversa deixa o microfone reabrindo sozinho. Sem uma saída falada,
+// a única forma de sair seria achar o botão — que é exatamente o que quem não
+// enxerga tem mais dificuldade de fazer, e foi o que travou no teste de campo.
+
+test("despedidas e pedidos de parar encerram a conversa", () => {
+  for (const t of [
+    "pode parar", "chega", "já deu", "tchau", "até logo", "obrigado",
+    "obrigada", "valeu", "encerrar", "encerra a conversa", "sair da conversa",
+    "é só isso", "nada mais", "fica quieto",
+  ]) {
+    assert.equal(acao(t), Acao.ENCERRAR, `"${t}" deveria encerrar`);
+  }
+});
+
+test("encerrar não rouba frases que são pergunta de verdade", () => {
+  // "obrigado" no meio de uma frase é educação, não despedida.
+  assert.equal(acao("obrigado, e o que tem à direita?"), Acao.PERGUNTA);
+  assert.equal(acao("chega de carro perto de mim?"), Acao.PERGUNTA);
+  // "parar rota" continua sendo parar a rota, não encerrar a conversa.
+  assert.equal(acao("parar rota"), Acao.PARAR_ROTA);
+  assert.equal(acao("cancela a navegação"), Acao.PARAR_ROTA);
+  // Socorro vence tudo, inclusive uma despedida mal reconhecida.
+  assert.equal(acao("socorro"), Acao.SOCORRO);
+});
+
+test("encerrar não atropela o pedido de ir a algum lugar", () => {
+  const c = interpretarComando("me leva até a padaria");
+  assert.equal(c.acao, Acao.IR);
+  assert.equal(c.destino, "padaria");
+});

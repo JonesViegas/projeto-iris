@@ -156,6 +156,8 @@ let dicaSocorroMs = -Infinity;
 // Conversa por voz
 const conversa = new Conversa();
 let ouvindo = null;               // reconhecimento em curso
+let modoConversa = false;         // a conversa segue sozinha, turno após turno
+let silenciosSeguidos = 0;        // duas vezes sem ouvir nada encerram a conversa
 let ultimaFalaImportante = null;  // para "repete"
 let gpsDaCamera = false;        // o GPS foi ligado pela câmera (não pela rota)
 
@@ -336,6 +338,11 @@ function speak(text, interrupt) {
 
 function dizer(texto, canal = Canal.NARRACAO, extra = {}) {
   if (!texto) return false;
+  // Durante a conversa o app cala a narração do ambiente. Dois motivos: ela
+  // atropelaria a resposta que a pessoa pediu, e entraria direto no microfone
+  // aberto, virando pergunta. O alerta de obstáculo continua passando — a
+  // conversa não pode custar a segurança de quem está andando.
+  if (modoConversa && !extra.daConversa && canal >= Canal.DESCRICAO) return false;
   const entrou = fila.oferecer({ texto, canal, ...extra }, performance.now());
   if (entrou) bombearFala();
   return entrou;
@@ -1377,54 +1384,165 @@ async function pedirSocorro() {
 })();
 
 // ---------------- Conversa por voz ----------------
-// Um botão largo, "Perguntar". Toque, fale. Comando conhecido resolve aqui
-// mesmo, sem internet; pergunta livre vai à IA de visão, se a pessoa ligou.
+// Um botão largo, "Conversar". Toque uma vez e a conversa começa: o app
+// escuta, responde e volta a escutar sozinho, turno após turno, até a pessoa
+// encerrar — pelo botão ou falando ("pode parar", "obrigado", "tchau").
+// Comando conhecido resolve aqui mesmo, sem internet; pergunta livre vai à IA
+// de visão, se a pessoa ligou a descrição detalhada.
+//
+// O estado de "ouvindo" mora em DOIS lugares de propósito: `modoConversa`
+// (a conversa está aberta) e `ouvindo` (há um microfone aberto agora). Eles
+// não são a mesma coisa — entre a resposta e o turno seguinte a conversa está
+// aberta e o microfone está fechado — e foi confundir os dois que travou o
+// botão na versão anterior.
 
-function marcarOuvindo(sim) {
+// Três estados, e o rótulo diz qual é. Quem não enxerga não vê o botão mudar
+// de cor, então cada transição também é falada ou vibrada.
+const ESTADO_CONVERSA = { PARADA: "parada", OUVINDO: "ouvindo", PENSANDO: "pensando" };
+
+function marcarConversa(estado) {
   const b = $("perguntar");
   if (!b) return;
-  b.dataset.ouvindo = String(sim);
-  $("rotuloPerguntar").textContent = sim ? "Ouvindo… fale agora" : "Perguntar";
+  b.dataset.estado = estado;
+  b.dataset.ouvindo = String(estado === ESTADO_CONVERSA.OUVINDO);
+  $("rotuloPerguntar").textContent =
+    estado === ESTADO_CONVERSA.OUVINDO ? "Ouvindo… fale agora"
+      : estado === ESTADO_CONVERSA.PENSANDO ? "Um instante…"
+        : "Conversar";
+  b.setAttribute("aria-label", estado === ESTADO_CONVERSA.PARADA
+    ? "Conversar com o Íris. Toque e fale."
+    : "Conversando. Toque para encerrar a conversa.");
 }
 
-function iniciarPergunta() {
-  unlockAudio();
-  if (ouvindo) { try { ouvindo.stop(); } catch { /* já parou */ } return; }
-  // A voz do próprio app entraria no microfone: cala antes de ouvir.
+/**
+ * Espera a voz do app terminar antes de reabrir o microfone.
+ *
+ * Sem isto o Íris ouve a si mesmo: o reconhecimento pega a própria resposta e
+ * a devolve como pergunta. O teto existe porque no iPhone `speaking` às vezes
+ * fica presa em true e esperar para sempre mataria a conversa.
+ */
+function quandoCalar(callback, tetoMs = 12000) {
+  const limite = performance.now() + tetoMs;
+  const olhar = () => {
+    const s = window.speechSynthesis;
+    const falando = Boolean(s?.speaking || s?.pending);
+    if (!falando || performance.now() > limite) { setTimeout(callback, 180); return; }
+    setTimeout(olhar, 150);
+  };
+  olhar();
+}
+
+/**
+ * Um turno de escuta. A conversa inteira é feita de turnos destes:
+ * escuta -> responde -> escuta de novo, até a pessoa encerrar.
+ */
+function escutarTurno() {
+  if (!modoConversa) return;
   try { window.speechSynthesis?.cancel(); } catch { /* sem voz */ }
+  marcarConversa(ESTADO_CONVERSA.OUVINDO);
   signal(false);
-  marcarOuvindo(true);
+
   ouvindo = ouvirFala({
-    aoOuvir: (texto) => { mostrar(`Você: ${texto}`, "info"); responderFala(texto); },
-    aoFalhar: (e) => { dizer(e.message, Canal.SISTEMA, { interrompe: true, chave: `voz:${e.message}` }); },
-    aoFim: () => { ouvindo = null; marcarOuvindo(false); },
+    aoOuvir: (texto) => {
+      silenciosSeguidos = 0;
+      mostrar(`Você: ${texto}`, "info");
+      marcarConversa(ESTADO_CONVERSA.PENSANDO);
+      responderFala(texto);
+    },
+    aoFalhar: (e) => {
+      // Silêncio não é erro de verdade: é a pessoa pensando, ou barulho de
+      // rua. Avisa na primeira vez, encerra na segunda — microfone aberto
+      // sem ninguém falando gasta bateria e dá a impressão de que o app
+      // travou, que foi exatamente o que aconteceu no teste.
+      if (/Não ouvi nada/i.test(e.message)) {
+        silenciosSeguidos += 1;
+        if (silenciosSeguidos >= 2) { encerrarConversa("Conversa encerrada."); return; }
+        dizer("Não ouvi. Pode falar.", Canal.SISTEMA, { interrompe: true, daConversa: true, chave: "voz:silencio" });
+        return;
+      }
+      dizer(e.message, Canal.SISTEMA, { interrompe: true, daConversa: true, chave: `voz:${e.message}` });
+      encerrarConversa(null);
+    },
+    aoFim: () => {
+      ouvindo = null;
+      // Se nada tomou a frente (resposta em curso ou encerramento), volta a
+      // ouvir. É o que faz disto uma conversa e não um walkie-talkie.
+      if (modoConversa && $("perguntar")?.dataset.estado === ESTADO_CONVERSA.OUVINDO) {
+        quandoCalar(() => escutarTurno());
+      }
+    },
   });
-  if (!ouvindo) marcarOuvindo(false);
+
+  // Navegador sem reconhecimento de fala: não adianta insistir.
+  if (!ouvindo) { modoConversa = false; marcarConversa(ESTADO_CONVERSA.PARADA); }
+}
+
+function abrirConversa() {
+  if (modoConversa) { encerrarConversa("Conversa encerrada."); return; }
+  unlockAudio();
+  modoConversa = true;
+  silenciosSeguidos = 0;
+  conversa.limpar();
+  escutarTurno();
+}
+
+/**
+ * Fecha tudo: microfone, estado e rótulo. Esta função é a rede de segurança
+ * do botão — qualquer caminho de saída passa por aqui, então não existe mais
+ * o estado "Ouvindo…" preso para sempre que apareceu no teste do celular.
+ */
+function encerrarConversa(aviso) {
+  modoConversa = false;
+  silenciosSeguidos = 0;
+  const atual = ouvindo;
+  ouvindo = null;
+  try { atual?.cancelar(); } catch { /* já fechou */ }
+  marcarConversa(ESTADO_CONVERSA.PARADA);
+  // Vibração diferente da de abrir o microfone: é o único jeito de quem não
+  // enxerga distinguir "comecei a ouvir" de "parei de ouvir" sem esperar a fala.
+  signal(true);
+  if (aviso) dizer(aviso, Canal.SISTEMA, { interrompe: true, daConversa: true, chave: `conversa:${aviso}` });
+}
+
+/** Depois de responder, volta a ouvir — a não ser que a conversa tenha acabado. */
+function continuarConversa() {
+  if (!modoConversa) return;
+  quandoCalar(() => escutarTurno());
 }
 
 async function responderFala(texto) {
   const c = interpretarComando(texto);
-  if (!c) return;
+  if (!c) { continuarConversa(); return; }
   diario.alerta({ text: `[voz] ${c.acao}`, tipo: "voz", priority: Priority.BAIXA });
+
+  // Encerrar sai antes de tudo: é a única resposta que não volta a ouvir.
+  if (c.acao === Acao.ENCERRAR) { encerrarConversa("Certo. Toque em conversar quando precisar."); return; }
+
+  try { await executarComando(c); }
+  finally { continuarConversa(); }
+}
+
+async function executarComando(c) {
+  const falar = (t, extra = {}) =>
+    dizer(t, Canal.SISTEMA, { interrompe: true, daConversa: true, ...extra });
 
   switch (c.acao) {
     case Acao.SOCORRO: return pedirSocorro();
     case Acao.ONDE_ESTOU: return ondeEstou();
     case Acao.DESCREVER:
-      if (state !== "ativo") { dizer("Toque em Iniciar para eu ligar a câmera, e pergunte de novo.", Canal.SISTEMA, { interrompe: true }); return; }
+      if (state !== "ativo") { falar("Toque em Iniciar para eu ligar a câmera, e pergunte de novo."); return; }
       return describe();
     case Acao.LER: return lerTexto();
     case Acao.IR: return iniciarNavegacao(c.destino);
     case Acao.PARAR_ROTA:
       if (navegador.ativo) return pararNavegacao(true);
-      dizer("Não há rota em andamento.", Canal.SISTEMA, { interrompe: true });
+      falar("Não há rota em andamento.");
       return;
     case Acao.REPETIR:
-      dizer(ultimaFalaImportante ?? "Ainda não falei nada para repetir.", Canal.SISTEMA,
-        { interrompe: true, chave: `repete:${Date.now()}` });
+      falar(ultimaFalaImportante ?? "Ainda não falei nada para repetir.", { chave: `repete:${Date.now()}` });
       return;
     case Acao.AJUDA:
-      dizer(AJUDA_FALADA, Canal.SISTEMA, { interrompe: true, validadeMs: 20000 });
+      falar(AJUDA_FALADA, { validadeMs: 20000 });
       return;
     default:
       return perguntarIA(c.texto);
@@ -1434,17 +1552,17 @@ async function responderFala(texto) {
 async function perguntarIA(pergunta) {
   if (state !== "ativo") {
     dizer("Para eu olhar e responder, toque em Iniciar e aponte a câmera. Depois pergunte de novo.",
-      Canal.SISTEMA, { interrompe: true });
+      Canal.SISTEMA, { interrompe: true, daConversa: true });
     return;
   }
   if (!prefs.nuvemLigada || !nuvem.configurado) {
     // Sem a IA na nuvem, ainda dá para ajudar: o que o aparelho vê sozinho.
     dizer("Para perguntas livres sobre a imagem, ligue a descrição detalhada nos ajustes. "
-      + "Por enquanto, digo o que vejo.", Canal.SISTEMA, { interrompe: true });
+      + "Por enquanto, digo o que vejo.", Canal.SISTEMA, { interrompe: true, daConversa: true });
     describe();
     return;
   }
-  dizer("Olhando.", Canal.SISTEMA, { interrompe: true, chave: "voz:olhando" });
+  dizer("Olhando.", Canal.SISTEMA, { interrompe: true, daConversa: true, chave: "voz:olhando" });
   const agora = performance.now();
   try {
     const { texto, ms } = await nuvem.perguntar(video, pergunta, {
@@ -1456,17 +1574,25 @@ async function perguntarIA(pergunta) {
       }),
     });
     conversa.registrar(pergunta, texto, performance.now());
-    dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 30000, chave: `resp:${Date.now()}` });
+    dizer(texto, Canal.DESCRICAO, { interrompe: true, daConversa: true, validadeMs: 30000, chave: `resp:${Date.now()}` });
     mostrar("Resposta", "info", texto);
     diario.descricao(`[pergunta] ${texto}`);
     barramento.publicar(Evento.DESCRICAO, { texto, origem: "conversa", ms });
   } catch (e) {
     diario.falha("conversa", e);
-    dizer(e.message, Canal.SISTEMA, { interrompe: true });
+    dizer(e.message, Canal.SISTEMA, { interrompe: true, daConversa: true });
   }
 }
 
-$("perguntar")?.addEventListener("click", iniciarPergunta);
+$("perguntar")?.addEventListener("click", abrirConversa);
+
+// Sair do app, trocar de aba ou bloquear a tela com o microfone aberto deixava
+// o botão preso em "Ouvindo…". Agora a conversa fecha junto.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && modoConversa) encerrarConversa(null);
+});
+
+marcarConversa(ESTADO_CONVERSA.PARADA);
 
 // ---------------- Onde estou? ----------------
 // Situa antes de guiar: rua, confiança do GPS, para onde a pessoa está

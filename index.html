@@ -163,6 +163,9 @@
   #perguntar { grid-column: 1 / -1; background: rgba(127,233,255,.10); color: var(--ciano-claro);
         border: 1px dashed rgba(127,233,255,.45); min-height: 52px; }
   #perguntar[data-ouvindo="true"] { background: var(--ciano-claro); color: #04121F; border-style: solid; }
+  /* "Pensando" precisa ser visivelmente diferente de "ouvindo": quem tem baixa
+     visão usa a cor para saber se ainda deve falar ou se já pode esperar. */
+  #perguntar[data-estado="pensando"] { background: rgba(127,233,255,.28); color: var(--ciano-claro); border-style: solid; }
   #socorro { background: #C62828; color: #FFF; padding: 0 14px; letter-spacing: .06em;
         font-weight: 800; touch-action: none; -webkit-user-select: none; user-select: none; }
   #socorro:active { transform: scale(.96); background: #E53935; }
@@ -334,13 +337,15 @@
       <span id="navRestante"></span>
     </span>
     <button id="pararRota" type="button" aria-label="Encerrar a rota">Parar rota</button>
-    <button id="perguntar" type="button" aria-label="Perguntar por voz. Toque e fale: onde estou, o que tem na minha frente, leia isso, me leva até um lugar, ou qualquer pergunta sobre a imagem">
+    <button id="perguntar" type="button" aria-live="polite"
+            aria-label="Conversar com o Íris. Toque e fale.">
+
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="9" y="2.5" width="6" height="12" rx="3"/>
         <path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3.5"/>
       </svg>
-      <span id="rotuloPerguntar">Perguntar</span>
+      <span id="rotuloPerguntar">Conversar</span>
     </button>
   </div>
 

@@ -176,25 +176,72 @@ export function ditarDestino({ aoOuvir, aoFalhar } = {}) {
  * Escuta uma frase qualquer (a conversa por voz). Mesmo motor do ditado do
  * destino, com o erro dito de forma que sirva a qualquer pergunta.
  */
-export function ouvirFala({ aoOuvir, aoFalhar, aoFim } = {}) {
+/** Quanto tempo o microfone pode ficar aberto sem o navegador dizer nada. */
+export const LIMITE_ESCUTA_MS = 12000;
+
+/**
+ * Abre o microfone para uma fala e devolve um controle com `cancelar()`.
+ *
+ * O cão de guarda não é luxo. No iPhone — onde o reconhecimento é o do
+ * WebKit — `onend` às vezes simplesmente não chega: a aba perde o foco de
+ * áudio, a síntese de voz do próprio app toma a sessão, ou a rede cai no meio.
+ * Sem o temporizador, `aoFim` nunca roda, o app continua achando que está
+ * ouvindo e o botão fica preso em "Ouvindo… fale agora" até recarregar a
+ * página. Quem não enxerga não tem como perceber que o botão travou: ele
+ * continua falando para um microfone que já fechou.
+ *
+ * `encerrar` roda **uma vez só**, venha de onde vier (resultado, erro, fim
+ * normal, estouro do tempo ou cancelamento). É isso que garante que o estado
+ * do botão sempre volte.
+ */
+export function ouvirFala({ aoOuvir, aoFalhar, aoFim, limiteMs = LIMITE_ESCUTA_MS } = {}) {
   const R = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!R) { aoFalhar?.(new Error("Este navegador não reconhece fala. Use os botões.")); return null; }
   const rec = new R();
   rec.lang = "pt-BR";
   rec.interimResults = false;
   rec.maxAlternatives = 1;
+
   let ouviu = false;
-  rec.onresult = (e) => { ouviu = true; aoOuvir?.(e.results[0][0].transcript); };
+  let encerrado = false;
+  let relogio = null;
+
+  const encerrar = (erro) => {
+    if (encerrado) return;
+    encerrado = true;
+    clearTimeout(relogio);
+    // Solta o microfone de verdade. `abort()` não espera resultado nenhum;
+    // `stop()` ainda tentaria entregar um e poderia não voltar.
+    try { rec.abort(); } catch { /* já fechou */ }
+    if (erro) aoFalhar?.(erro);
+    aoFim?.();
+  };
+
+  relogio = setTimeout(
+    () => encerrar(new Error("Não ouvi nada. Toque e fale de novo.")),
+    limiteMs,
+  );
+
+  rec.onresult = (e) => {
+    ouviu = true;
+    clearTimeout(relogio);
+    aoOuvir?.(e.results[0][0].transcript);
+  };
   rec.onerror = (e) => {
     ouviu = true;
-    aoFalhar?.(new Error(
+    // "aborted" é o cancelamento pedido pelo próprio app: não é falha, e
+    // avisar o usuário dela seria ruído.
+    encerrar(e.error === "aborted" ? null : new Error(
       e.error === "not-allowed" ? "Permissão de microfone negada."
         : e.error === "no-speech" ? "Não ouvi nada. Toque e fale de novo."
           : e.error === "network" ? "O reconhecimento de fala precisa de internet neste aparelho."
             : "Não entendi. Toque e fale de novo.",
     ));
   };
-  rec.onend = () => { if (!ouviu) aoFalhar?.(new Error("Não ouvi nada. Toque e fale de novo.")); aoFim?.(); };
-  try { rec.start(); } catch { /* já estava ouvindo */ }
-  return rec;
+  rec.onend = () => encerrar(ouviu ? null : new Error("Não ouvi nada. Toque e fale de novo."));
+
+  try { rec.start(); }
+  catch { /* já estava ouvindo: o onend/onerror dele resolve */ }
+
+  return { cancelar: () => encerrar(null), bruto: rec };
 }

@@ -32,6 +32,7 @@ export const Acao = {
   SOCORRO: "socorro",
   REPETIR: "repetir",
   AJUDA: "ajuda",
+  ENCERRAR: "encerrar",
   PERGUNTA: "pergunta",
 };
 
@@ -54,6 +55,12 @@ const REGRAS = [
   { acao: Acao.DESCREVER, re: /^(o que (tem|ha) (aqui|na minha frente|a minha frente|em volta|ao redor|a minha volta|na frente)|descreve?r?( (o ambiente|aqui|isso|o lugar))?|o que (voce|vc) (ve|esta vendo))$/ },
   { acao: Acao.REPETIR, re: /^(repete|repetir|repita|fala de novo|o que (voce|vc) disse|nao entendi)$/ },
   { acao: Acao.AJUDA, re: /^(ajuda|o que (voce|vc) (faz|sabe fazer)|quais (sao os )?comandos|como (eu )?uso)$/ },
+  // Sair da conversa falando, sem procurar o botão. Casa a frase inteira de
+  // propósito: "obrigado, e o que tem à direita?" é pergunta, não despedida.
+  {
+    acao: Acao.ENCERRAR,
+    re: /^(ja (deu|chega|basta|entendi)|chega|basta|pode parar|para( de falar)?|parar|encerra(r)?( a conversa)?|fecha(r)?( a conversa)?|sai(r)?( da conversa)?|tchau|ate (logo|mais)|valeu|obrigad[oa]( viu| iris)?|brigad[oa]|e so isso|so isso|nada mais|silencio|fica quieto|cala a boca)$/,
+  },
 ];
 
 // "me leva até a farmácia", "quero ir para a rua 13 de junho", "como chego na rodoviária"
@@ -93,7 +100,8 @@ function recuperarGrafia(original, alvoNorm) {
 export const AJUDA_FALADA =
   "Você pode dizer: onde estou; o que tem na minha frente; leia isso; me leva até a farmácia; "
   + "parar rota; repete; ou socorro. Com a descrição detalhada ligada, pode perguntar qualquer "
-  + "coisa sobre o que a câmera mostra, como: essa nota é de quanto, ou tem cadeira livre.";
+  + "coisa sobre o que a câmera mostra, como: essa nota é de quanto, ou tem cadeira livre. "
+  + "Pode continuar falando que eu continuo ouvindo. Para encerrar, diga: pode parar.";
 
 // ============================================================
 // Histórico da conversa

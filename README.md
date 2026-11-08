@@ -109,9 +109,29 @@ Arquitetura, decisões e próximas etapas de ML: [`docs/ROTEIRO-ML.md`](docs/ROT
   dois metros e meio" no mesmo segundo virou uma frase só; objeto parado à mesma distância não
   repete a cada 3 s; e a narração não anuncia o que o alerta vai anunciar logo depois.
 
-## Conversa por voz (0.12)
+## Conversa por voz (0.13)
 
-Botão largo **Perguntar**: toque e fale. Duas camadas:
+Botão largo **Conversar**: toque uma vez e a conversa começa. Depois de cada resposta o
+microfone **reabre sozinho** — não é preciso tocar de novo para fazer a pergunta seguinte.
+Para encerrar: toque no botão outra vez, ou fale "pode parar", "chega", "obrigado", "tchau".
+
+O botão tem três estados, e cada um tem rótulo próprio, porque quem não enxerga não vê a cor
+mudar: **Conversar** (parado), **Ouvindo… fale agora**, **Um instante…** (a resposta está vindo).
+
+Enquanto a conversa está aberta, a narração do ambiente cala: ela atropelaria a resposta e
+entraria no microfone aberto virando pergunta. **O alerta de obstáculo continua passando** — a
+conversa não custa a segurança de quem está andando.
+
+**Por que o modo conversa existe (0.13).** No teste de campo de 7 de novembro de 2026 o botão
+ficou preso em "Ouvindo… fale agora" e não voltava mais. A causa está em `posicao.js`: o
+reconhecimento do navegador nem sempre dispara `onend` — no iPhone a síntese de voz do próprio
+app toma a sessão de áudio e o evento se perde. Sem `onend`, o app continuava achando que
+estava ouvindo, para sempre. Agora `ouvirFala` tem cão de guarda de 12 s, encerramento
+idempotente (roda uma vez só, venha de onde vier) e `cancelar()` que usa `abort()`, não
+`stop()`. A conversa também fecha ao trocar de aba ou bloquear a tela, e dois silêncios
+seguidos a encerram em vez de deixar o microfone aberto.
+
+Duas camadas:
 
 **Comandos, resolvidos no aparelho, sem internet e sem mandar imagem** (`conversa.js`):
 "onde eu estou?", "o que tem na minha frente?", "lê isso pra mim", "me leva até a farmácia",
@@ -129,6 +149,15 @@ o que foi perguntado em até três frases, orienta a câmera quando a resposta n
 Sem a descrição detalhada, uma pergunta livre cai para a descrição do aparelho e o app diz isso.
 O reconhecimento de fala é o do navegador: no Android (Chrome) costuma precisar de internet; no
 iPhone, depende da versão do Safari.
+
+O prompt do `/conversar` foi reescrito na 0.13 para ser conversa, não formulário: sem
+cumprimento repetido, sem "claro" antes de responder, sem oferecer ajuda no fim (o microfone já
+reabre sozinho), e com o fio sempre na orientação — onde a pessoa está, o que tem em volta, por
+onde dá para andar. Como a pessoa pode estar andando entre um turno e outro, o prompt manda
+descrever a foto de agora e avisar quando algo que foi citado antes saiu de cena.
+
+**Custo:** cada turno da conversa manda uma foto ao modelo. Uma conversa de dez turnos são dez
+chamadas. O limite do proxy é de 20 por minuto por IP (`LIMITE` em `servidor/proxy-descricao.mjs`).
 
 ## Ameaças e socorro (0.11)
 
