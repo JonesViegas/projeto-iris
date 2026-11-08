@@ -13,6 +13,7 @@ import {
   associarCortantes, Priority, ALTURA_REAL_M, FOV_VERTICAL_RAD, registrarClasses,
 } from "../core.js";
 import { AvaliadorDeAmeacas, Nivel, ROTULO_ARMA } from "../ameacas.js";
+import { interpretarComando, Acao, AJUDA_FALADA } from "../conversa.js";
 
 // Os rótulos do vocabulário aberto que as cenas usam (o app registra todos
 // a partir de aberto.js, que precisa de navegador).
@@ -212,8 +213,48 @@ function simularOndeEstou() {
   ];
 }
 
+// ---------------- conversa por voz ----------------
+// O que cada frase dita vira: a interpretação é a real (conversa.js). As
+// respostas da IA de visão não são simuladas — dependem da foto — e aparecem
+// marcadas como tal.
+function simularConversa() {
+  const onde = simularOndeEstou()[0].texto;
+  let ultima = null;
+  const resposta = (falado) => {
+    const c = interpretarComando(falado);
+    switch (c.acao) {
+      case Acao.ONDE_ESTOU: return { texto: onde, nota: "comando: resolvido no aparelho" };
+      case Acao.DESCREVER: return { texto: "À frente, uma mesa e duas cadeiras; à direita, uma porta.", nota: "comando: descrição do aparelho (cena de exemplo)" };
+      case Acao.LER: return { texto: "Lendo. \"Farmácia Popular. Aberto até as 22 horas.\"", nota: "comando: leitura de texto do aparelho (placa de exemplo)" };
+      case Acao.IR: return { texto: `Procurando o caminho até ${c.destino}.`, nota: `comando: navegação até "${c.destino}"` };
+      case Acao.REPETIR: return { texto: ultima, nota: "comando: repete a última fala importante" };
+      case Acao.AJUDA: return { texto: AJUDA_FALADA, nota: "comando: ajuda" };
+      case Acao.SOCORRO: return { texto: "Pedindo socorro. Pegando a sua localização.", nota: "comando: SOS" };
+      default: return {
+        texto: "Para perguntas livres sobre a imagem, ligue a descrição detalhada nos ajustes. Por enquanto, digo o que vejo.",
+        nota: "pergunta livre: com a descrição detalhada ligada, a IA de visão olha a foto e responde aqui",
+      };
+    }
+  };
+  const falas = ["Onde eu estou?", "O que tem na minha frente?", "Lê isso pra mim", "Me leva até a farmácia",
+    "Essa nota é de quanto?", "Repete", "Quais são os comandos?"];
+  const linhas = [];
+  let t = 0;
+  for (const f of falas) {
+    linhas.push({ t, texto: f, tipo: "voce" });
+    const r = resposta(f);
+    ultima = r.texto;
+    linhas.push({ t: t + 1, texto: r.texto, tipo: "aviso", nota: r.nota });
+    t += 15;
+  }
+  return linhas;
+}
+
 // ---------------- catálogo ----------------
 export const CENARIOS = [
+  { id: "voz", grupo: "Situar", titulo: "Conversa por voz",
+    resumo: "A pessoa toca em Perguntar e fala. Comandos conhecidos resolvem no aparelho, sem internet; perguntas livres vão à IA de visão.",
+    gerar: simularConversa },
   { id: "alinhar", grupo: "Andar", titulo: "Virado para o lado errado",
     resumo: "Parado na calçada, de costas para o caminho. O app guia o giro e confirma quando acerta.",
     gerar: () => simularRota({ rota: rotaEmL, rumoInicial: 270 }) },

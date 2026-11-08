@@ -69,8 +69,30 @@ export class DescritorNaNuvem {
    * Devolve { texto, ms } ou lança erro com mensagem já falável.
    */
   async descrever(video, contexto = {}) {
+    return this.#enviar(this.endpoint, video, { contexto }, "descrição");
+  }
+
+  /** Para onde vão as perguntas: o mesmo proxy, rota /conversar. */
+  get endpointConversa() {
+    return this.endpoint.replace(/\/descrever\/?$/, "/conversar");
+  }
+
+  /**
+   * Pergunta livre sobre o que a câmera mostra agora ("essa nota é de
+   * quanto?"). Vai UMA foto, a de agora; o histórico viaja só como texto.
+   * Devolve { texto, ms } ou lança erro com mensagem já falável.
+   */
+  async perguntar(video, pergunta, { historico = [], contexto = {} } = {}) {
+    return this.#enviar(this.endpointConversa, video, {
+      pergunta: String(pergunta).slice(0, 500),
+      historico: historico.slice(-6),
+      contexto,
+    }, "resposta");
+  }
+
+  async #enviar(url, video, extra, oQue) {
     if (!this.configurado) throw new Error("A descrição detalhada não está configurada neste servidor.");
-    if (this.ocupado) throw new Error("Ainda estou processando a descrição anterior.");
+    if (this.ocupado) throw new Error("Ainda estou pensando na pergunta anterior.");
 
     const imagem = this.#quadro(video);
     if (!imagem) throw new Error("A câmera não entregou imagem.");
@@ -80,10 +102,10 @@ export class DescritorNaNuvem {
     const corte = AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT_MS) : undefined;
 
     try {
-      const r = await fetch(this.endpoint, {
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imagem, contexto, idioma: this.idioma }),
+        body: JSON.stringify({ imagem, idioma: this.idioma, ...extra }),
         signal: corte,
       });
 
@@ -100,13 +122,13 @@ export class DescritorNaNuvem {
       }
 
       const j = await r.json().catch(() => null);
-      if (!j?.texto) throw new Error("A descrição voltou vazia.");
+      if (!j?.texto) throw new Error(`A ${oQue} voltou vazia.`);
 
       this.ultimoMs = Math.round(performance.now() - t0);
       return { texto: String(j.texto).trim(), ms: this.ultimoMs };
     } catch (e) {
       if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-        throw new Error("A descrição demorou demais. Sigo com o que vejo aqui.");
+        throw new Error(`A ${oQue} demorou demais. Sigo com o que vejo aqui.`);
       }
       if (e instanceof TypeError) throw new Error("Sem internet para a descrição detalhada.");
       throw e;

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.11.0">
+<meta name="iris-versao" content="0.12.0">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -160,6 +160,9 @@
   #ondeEstou { background: rgba(127,233,255,.14); color: var(--ciano-claro);
         border: 1px solid rgba(127,233,255,.3); width: 100%; }
   body[data-navegando="true"] #ondeEstou { display: none; }
+  #perguntar { grid-column: 1 / -1; background: rgba(127,233,255,.10); color: var(--ciano-claro);
+        border: 1px dashed rgba(127,233,255,.45); min-height: 52px; }
+  #perguntar[data-ouvindo="true"] { background: var(--ciano-claro); color: #04121F; border-style: solid; }
   #socorro { background: #C62828; color: #FFF; padding: 0 14px; letter-spacing: .06em;
         font-weight: 800; touch-action: none; -webkit-user-select: none; user-select: none; }
   #socorro:active { transform: scale(.96); background: #E53935; }
@@ -331,6 +334,14 @@
       <span id="navRestante"></span>
     </span>
     <button id="pararRota" type="button" aria-label="Encerrar a rota">Parar rota</button>
+    <button id="perguntar" type="button" aria-label="Perguntar por voz. Toque e fale: onde estou, o que tem na minha frente, leia isso, me leva até um lugar, ou qualquer pergunta sobre a imagem">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="9" y="2.5" width="6" height="12" rx="3"/>
+        <path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3.5"/>
+      </svg>
+      <span id="rotuloPerguntar">Perguntar</span>
+    </button>
   </div>
 
   <main class="view">

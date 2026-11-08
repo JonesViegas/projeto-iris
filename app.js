@@ -14,7 +14,8 @@ import { Diario, TipoErro } from "./diario.js";
 import { Canal, FilaDeFala, Fraseador, EstadoDaCena, NarracaoDeAmbiente } from "./fala.js";
 import { Navegador, referenciaNoLado, distanciaFalada } from "./navegacao.js";
 import { tracarRota } from "./rotas.js";
-import { RastreadorDePosicao, Bussola, ditarDestino } from "./posicao.js";
+import { RastreadorDePosicao, Bussola, ditarDestino, ouvirFala } from "./posicao.js";
+import { interpretarComando, Acao, Conversa, AJUDA_FALADA } from "./conversa.js";
 import {
   DetectorAberto, nomesDoVocabulario, rotulosDeRisco, ALTURAS_ABERTAS, VOCABULARIO,
   consultasDeAmeaca,
@@ -151,6 +152,11 @@ let confirmandoAmeaca = false;
 let ultimaConfirmacaoMs = 0;
 let ultimaAmeaca = null;        // vai como motivo na mensagem de socorro
 let dicaSocorroMs = -Infinity;
+
+// Conversa por voz
+const conversa = new Conversa();
+let ouvindo = null;               // reconhecimento em curso
+let ultimaFalaImportante = null;  // para "repete"
 let gpsDaCamera = false;        // o GPS foi ligado pela câmera (não pela rota)
 
 // ---------------- Preferências ----------------
@@ -346,6 +352,7 @@ function bombearFala() {
   const saida = fila.proxima(performance.now(), ocupada);
   if (!saida) return;
   speak(saida.texto, saida.interromper);
+  if (saida.canal !== Canal.NARRACAO) ultimaFalaImportante = saida.texto;
   mostrar(saida.texto, NIVEL_DO_CANAL[saida.canal] ?? "info");
 }
 
@@ -1368,6 +1375,98 @@ async function pedirSocorro() {
   // pointerdown longo. Ali o próprio gesto já é deliberado, então vale.
   btn.addEventListener("click", (e) => { if (e.detail === 0) pedirSocorro(); });
 })();
+
+// ---------------- Conversa por voz ----------------
+// Um botão largo, "Perguntar". Toque, fale. Comando conhecido resolve aqui
+// mesmo, sem internet; pergunta livre vai à IA de visão, se a pessoa ligou.
+
+function marcarOuvindo(sim) {
+  const b = $("perguntar");
+  if (!b) return;
+  b.dataset.ouvindo = String(sim);
+  $("rotuloPerguntar").textContent = sim ? "Ouvindo… fale agora" : "Perguntar";
+}
+
+function iniciarPergunta() {
+  unlockAudio();
+  if (ouvindo) { try { ouvindo.stop(); } catch { /* já parou */ } return; }
+  // A voz do próprio app entraria no microfone: cala antes de ouvir.
+  try { window.speechSynthesis?.cancel(); } catch { /* sem voz */ }
+  signal(false);
+  marcarOuvindo(true);
+  ouvindo = ouvirFala({
+    aoOuvir: (texto) => { mostrar(`Você: ${texto}`, "info"); responderFala(texto); },
+    aoFalhar: (e) => { dizer(e.message, Canal.SISTEMA, { interrompe: true, chave: `voz:${e.message}` }); },
+    aoFim: () => { ouvindo = null; marcarOuvindo(false); },
+  });
+  if (!ouvindo) marcarOuvindo(false);
+}
+
+async function responderFala(texto) {
+  const c = interpretarComando(texto);
+  if (!c) return;
+  diario.alerta({ text: `[voz] ${c.acao}`, tipo: "voz", priority: Priority.BAIXA });
+
+  switch (c.acao) {
+    case Acao.SOCORRO: return pedirSocorro();
+    case Acao.ONDE_ESTOU: return ondeEstou();
+    case Acao.DESCREVER:
+      if (state !== "ativo") { dizer("Toque em Iniciar para eu ligar a câmera, e pergunte de novo.", Canal.SISTEMA, { interrompe: true }); return; }
+      return describe();
+    case Acao.LER: return lerTexto();
+    case Acao.IR: return iniciarNavegacao(c.destino);
+    case Acao.PARAR_ROTA:
+      if (navegador.ativo) return pararNavegacao(true);
+      dizer("Não há rota em andamento.", Canal.SISTEMA, { interrompe: true });
+      return;
+    case Acao.REPETIR:
+      dizer(ultimaFalaImportante ?? "Ainda não falei nada para repetir.", Canal.SISTEMA,
+        { interrompe: true, chave: `repete:${Date.now()}` });
+      return;
+    case Acao.AJUDA:
+      dizer(AJUDA_FALADA, Canal.SISTEMA, { interrompe: true, validadeMs: 20000 });
+      return;
+    default:
+      return perguntarIA(c.texto);
+  }
+}
+
+async function perguntarIA(pergunta) {
+  if (state !== "ativo") {
+    dizer("Para eu olhar e responder, toque em Iniciar e aponte a câmera. Depois pergunte de novo.",
+      Canal.SISTEMA, { interrompe: true });
+    return;
+  }
+  if (!prefs.nuvemLigada || !nuvem.configurado) {
+    // Sem a IA na nuvem, ainda dá para ajudar: o que o aparelho vê sozinho.
+    dizer("Para perguntas livres sobre a imagem, ligue a descrição detalhada nos ajustes. "
+      + "Por enquanto, digo o que vejo.", Canal.SISTEMA, { interrompe: true });
+    describe();
+    return;
+  }
+  dizer("Olhando.", Canal.SISTEMA, { interrompe: true, chave: "voz:olhando" });
+  const agora = performance.now();
+  try {
+    const { texto, ms } = await nuvem.perguntar(video, pergunta, {
+      historico: conversa.historico(agora),
+      contexto: contextoLocal({
+        objetos: ultimosObjetos, piso: pisoAtual?.nome ?? null,
+        navegando: navegador.ativo ? rotaAtual?.destino?.nome ?? null : null,
+        local: ultimoOndeEstou?.endereco ?? null,
+      }),
+    });
+    conversa.registrar(pergunta, texto, performance.now());
+    dizer(texto, Canal.DESCRICAO, { interrompe: true, validadeMs: 30000, chave: `resp:${Date.now()}` });
+    mostrar("Resposta", "info", texto);
+    diario.descricao(`[pergunta] ${texto}`);
+    barramento.publicar(Evento.DESCRICAO, { texto, origem: "conversa", ms });
+  } catch (e) {
+    diario.falha("conversa", e);
+    dizer(e.message, Canal.SISTEMA, { interrompe: true });
+  }
+}
+
+$("perguntar")?.addEventListener("click", iniciarPergunta);
 
 // ---------------- Onde estou? ----------------
 // Situa antes de guiar: rua, confiança do GPS, para onde a pessoa está

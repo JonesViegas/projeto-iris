@@ -75,6 +75,13 @@ location /api/descrever {
     client_max_body_size 4m;
     proxy_read_timeout 30s;
 }
+# Conversa por voz (0.12): mesma chave, mesmo limite de uso
+location /api/conversar {
+    proxy_pass http://127.0.0.1:8787/conversar;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    client_max_body_size 4m;
+    proxy_read_timeout 30s;
+}
 ```
 
 Teste: `curl https://iris.viegastechs.com.br/api/descrever` deve responder 404 do
@@ -83,6 +90,9 @@ proxy (rota só aceita POST), e `curl http://127.0.0.1:8787/saude` deve devolver
 ---
 
 ## Custo
+
+Uma pergunta da conversa custa parecido com uma descrição (uma foto, resposta mais curta, mais
+umas centenas de fichas de histórico em texto).
 
 Uma descrição manda uma foto de 1024 px e recebe de três a cinco frases. Dá em torno de
 1.600 fichas de entrada e 150 de saída. Com o `claude-opus-5-5` configurado

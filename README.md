@@ -109,6 +109,27 @@ Arquitetura, decisões e próximas etapas de ML: [`docs/ROTEIRO-ML.md`](docs/ROT
   dois metros e meio" no mesmo segundo virou uma frase só; objeto parado à mesma distância não
   repete a cada 3 s; e a narração não anuncia o que o alerta vai anunciar logo depois.
 
+## Conversa por voz (0.12)
+
+Botão largo **Perguntar**: toque e fale. Duas camadas:
+
+**Comandos, resolvidos no aparelho, sem internet e sem mandar imagem** (`conversa.js`):
+"onde eu estou?", "o que tem na minha frente?", "lê isso pra mim", "me leva até a farmácia",
+"parar rota", "repete", "quais são os comandos?", "socorro".
+
+**Perguntas livres, respondidas pela IA de visão** — só com a descrição detalhada ligada (o mesmo
+consentimento falado): "essa nota é de quanto?", "tem cadeira livre?", "qual a validade desse
+remédio?", "a porta está aberta?". Vai uma foto, a do instante da pergunta. A conversa tem
+memória curta, só em texto (seis turnos, três minutos), para valer "e a outra?" — as fotos
+anteriores não são reenviadas. O proxy ganhou a rota `/conversar`, com prompt próprio: responde
+o que foi perguntado em até três frases, orienta a câmera quando a resposta não está no quadro
+("gire o produto devagar"), lê remédio sem recomendar dose e mantém os limites da descrição
+(nunca "pode atravessar", nada de identificar pessoas ou atribuir intenção).
+
+Sem a descrição detalhada, uma pergunta livre cai para a descrição do aparelho e o app diz isso.
+O reconhecimento de fala é o do navegador: no Android (Chrome) costuma precisar de internet; no
+iPhone, depende da versão do Safari.
+
 ## Ameaças e socorro (0.11)
 
 `ameacas.js` responde uma pergunta diferente da do alerta comum: não "o que está perto", mas
@@ -145,8 +166,8 @@ socorro."*
 
 ### Simulador de voz no celular
 
-`simulador/` toca no navegador, com a voz do aparelho, o que o app diria em catorze cenas (onde
-estou, rota, travessia, desvio, sem bússola, ameaças e câmera). Roda o mesmo código do app, sem câmera nem GPS.
+`simulador/` toca no navegador, com a voz do aparelho, o que o app diria em quinze cenas (onde
+estou, conversa por voz, rota, travessia, desvio, sem bússola, ameaças e câmera). Roda o mesmo código do app, sem câmera nem GPS.
 
 ```bash
 bash simulador/montar.sh      # gera simulador/simulador.html, arquivo único
@@ -299,6 +320,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `localizar.js` | **Lógica pura** do "Onde estou?": endereço, referências, direção relativa |
 | `lugares.js` | **Lógica pura** dos lugares familiares: aprender, reconhecer, esquecer |
 | `embedder.js` | Vetor de características do quadro (MediaPipe ImageEmbedder) |
+| `conversa.js` | **Lógica pura**: comandos de voz e memória curta da conversa |
 | `ameacas.js` | **Lógica pura**: colisão, queda, pessoa, possível arma; mensagem de socorro |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
@@ -315,7 +337,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/*.test.mjs      # 114 testes: lógica, fala, navegação, layout e carga
+node --test test/*.test.mjs      # 120 testes: lógica, fala, navegação, layout e carga
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
@@ -365,7 +387,7 @@ Atualizar:
 ```bash
 tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
     vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
-    localizar.js lugares.js embedder.js ameacas.js \
+    localizar.js lugares.js embedder.js ameacas.js conversa.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```

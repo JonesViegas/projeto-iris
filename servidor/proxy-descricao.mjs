@@ -15,6 +15,7 @@
 //
 // Atrás do nginx, com o app em https://iris.viegastechs.com.br:
 //   location /api/descrever { proxy_pass http://127.0.0.1:8787/descrever; }
+//   location /api/conversar { proxy_pass http://127.0.0.1:8787/conversar; }
 
 import http from "node:http";
 import Anthropic from "@anthropic-ai/sdk";
@@ -57,6 +58,29 @@ Limites que você não ultrapassa:
 - Não invente. Se a imagem estiver escura, tremida ou cortada, diga isso em uma frase e descreva só o que dá para ver.
 
 Responda em português do Brasil, em texto corrido, pronto para ser lido em voz alta. Sem listas, sem marcadores, sem títulos.`;
+
+// O prompt da conversa: a pessoa PERGUNTA algo sobre o que a câmera mostra.
+// A diferença para a descrição é o foco: responder exatamente o que foi
+// perguntado, curto, e guiar a câmera quando a resposta não está no quadro.
+const SISTEMA_CONVERSA = `Você é os olhos de uma pessoa cega. Ela segura o celular à frente do corpo, aponta a câmera e faz uma pergunta por voz. Você vê uma foto do instante da pergunta e responde por voz.
+
+Como responder:
+- Responda exatamente o que foi perguntado, primeiro, em uma a três frases curtas. Nada de introdução.
+- Se a resposta não está visível, diga isso e oriente a câmera: "Não vejo a etiqueta. Gire o produto devagar" ou "Aponte um pouco mais para a esquerda e para baixo".
+- Se a imagem estiver escura, tremida ou cortada, diga em uma frase e peça para tentar de novo.
+- Dinheiro: diga o valor de cada nota ou moeda que conseguir ver com clareza; se tiver dúvida, diga a dúvida.
+- Remédio: leia nome, dosagem e validade quando legíveis. Nunca recomende tomar, não tomar ou quanto tomar.
+- Texto: leia literalmente, entre aspas, o trecho que responde à pergunta.
+- Posição: use "à sua esquerda", "bem à frente", "à sua direita", "em cima", "embaixo", e diga o que está perto antes do que está longe.
+- Perguntas de continuação ("e a outra?", "e do lado?") se referem à conversa anterior; a foto é sempre a de agora.
+
+Limites que você não ultrapassa:
+- Nunca diga que é seguro atravessar, avançar, descer ou subir. Descreva o que vê; a decisão é da pessoa.
+- Não descreva raça, etnia, provável religião, peso, beleza, orientação, deficiência aparente ou estado de saúde de ninguém, nem tente identificar alguém pelo nome. Se perguntarem quem é, descreva só o que a pessoa faz e o que veste quando isso servir à tarefa.
+- Não atribua intenção a ninguém ("vai roubar", "é perigoso"). Descreva o comportamento.
+- Não invente. Na dúvida, diga a dúvida.
+
+Responda em português do Brasil, em texto corrido, pronto para ser lido em voz alta. Sem listas, sem marcadores, sem emojis.`;
 
 function instrucaoDoContexto(ctx) {
   if (!ctx) return "Descreva o ambiente.";
@@ -150,7 +174,9 @@ const servidor = http.createServer(async (req, res) => {
   cors(req, res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
   if (req.method === "GET" && req.url === "/saude") { responder(res, 200, { ok: true, modelo: MODELO }); return; }
-  if (req.method !== "POST" || !req.url.startsWith("/descrever")) { responder(res, 404, { erro: "rota desconhecida" }); return; }
+  const rota = req.url.startsWith("/descrever") ? "descrever"
+    : req.url.startsWith("/conversar") ? "conversar" : null;
+  if (req.method !== "POST" || !rota) { responder(res, 404, { erro: "rota desconhecida" }); return; }
 
   const ip = req.headers["x-forwarded-for"]?.split(",")[0].trim()
     ?? req.socket.remoteAddress ?? "desconhecido";
@@ -165,11 +191,42 @@ const servidor = http.createServer(async (req, res) => {
     return;
   }
 
+  let mensagens;
+  if (rota === "conversar") {
+    const pergunta = typeof corpo.pergunta === "string" ? corpo.pergunta.trim().slice(0, 500) : "";
+    if (!pergunta) { responder(res, 400, { erro: "pergunta ausente" }); return; }
+    // O histórico é só texto (as fotos anteriores não voltam) e é validado
+    // aqui: o cliente não escolhe papéis nem injeta instruções de sistema.
+    const historico = Array.isArray(corpo.historico) ? corpo.historico.slice(-6) : [];
+    mensagens = [];
+    for (const t of historico) {
+      if (typeof t?.pergunta !== "string" || typeof t?.resposta !== "string") continue;
+      mensagens.push({ role: "user", content: t.pergunta.slice(0, 500) });
+      mensagens.push({ role: "assistant", content: t.resposta.slice(0, 1500) });
+    }
+    const ctxTexto = corpo.contexto ? instrucaoDoContexto(corpo.contexto).replace(/ Descreva o ambiente\.$/, "") : "";
+    mensagens.push({
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: corpo.imagem } },
+        { type: "text", text: `${ctxTexto ? `${ctxTexto}\n\n` : ""}Pergunta da pessoa: ${pergunta}` },
+      ],
+    });
+  } else {
+    mensagens = [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: corpo.imagem } },
+        { type: "text", text: instrucaoDoContexto(corpo.contexto) },
+      ],
+    }];
+  }
+
   try {
     const resposta = await cliente.messages.create({
       model: MODELO,
-      max_tokens: MAX_TOKENS,
-      system: SISTEMA,
+      max_tokens: rota === "conversar" ? 300 : MAX_TOKENS,
+      system: rota === "conversar" ? SISTEMA_CONVERSA : SISTEMA,
       // Descrição falada que alguém espera de pé na rua: latência pesa mais do
       // que profundidade de raciocínio. Em Opus 5.5 o pensamento não desliga,
       // então o controle é o esforço.
@@ -178,13 +235,7 @@ const servidor = http.createServer(async (req, res) => {
       // modelo sozinho em vez de devolver silêncio a quem está na calçada.
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: corpo.imagem } },
-          { type: "text", text: instrucaoDoContexto(corpo.contexto) },
-        ],
-      }],
+      messages: mensagens,
     });
 
     if (resposta.stop_reason === "refusal") {
@@ -203,7 +254,7 @@ const servidor = http.createServer(async (req, res) => {
 
     // Nunca registramos a imagem nem o texto da descrição: o que a pessoa
     // aponta a câmera é assunto dela. Só os números de uso.
-    console.log(`[${new Date().toISOString()}] descrição ok `
+    console.log(`[${new Date().toISOString()}] ${rota} ok `
       + `entrada=${resposta.usage.input_tokens} saída=${resposta.usage.output_tokens}`);
 
     responder(res, 200, { texto: texto || "Não consegui descrever esta cena." });

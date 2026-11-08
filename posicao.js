@@ -171,3 +171,30 @@ export function ditarDestino({ aoOuvir, aoFalhar } = {}) {
   try { rec.start(); } catch { /* já estava ouvindo */ }
   return rec;
 }
+
+/**
+ * Escuta uma frase qualquer (a conversa por voz). Mesmo motor do ditado do
+ * destino, com o erro dito de forma que sirva a qualquer pergunta.
+ */
+export function ouvirFala({ aoOuvir, aoFalhar, aoFim } = {}) {
+  const R = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!R) { aoFalhar?.(new Error("Este navegador não reconhece fala. Use os botões.")); return null; }
+  const rec = new R();
+  rec.lang = "pt-BR";
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  let ouviu = false;
+  rec.onresult = (e) => { ouviu = true; aoOuvir?.(e.results[0][0].transcript); };
+  rec.onerror = (e) => {
+    ouviu = true;
+    aoFalhar?.(new Error(
+      e.error === "not-allowed" ? "Permissão de microfone negada."
+        : e.error === "no-speech" ? "Não ouvi nada. Toque e fale de novo."
+          : e.error === "network" ? "O reconhecimento de fala precisa de internet neste aparelho."
+            : "Não entendi. Toque e fale de novo.",
+    ));
+  };
+  rec.onend = () => { if (!ouviu) aoFalhar?.(new Error("Não ouvi nada. Toque e fale de novo.")); aoFim?.(); };
+  try { rec.start(); } catch { /* já estava ouvindo */ }
+  return rec;
+}
