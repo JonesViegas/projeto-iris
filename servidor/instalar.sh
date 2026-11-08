@@ -18,6 +18,31 @@ UNIDADE=/etc/systemd/system/iris-descricao.service
 VHOST=/etc/nginx/sites-available/iris
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+echo "==> node"
+# A sgcobra é Ubuntu 22.04 e o nodejs do apt ali é a versão 12 — o SDK da
+# Anthropic exige 20 ou mais. Sem este passo, o `npm install` abaixo falha com
+# erro de engine e o serviço nem chega a subir. NodeSource é o caminho oficial.
+precisa_node=1
+if command -v node >/dev/null 2>&1; then
+  maior="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  [ "$maior" -ge 20 ] 2>/dev/null && precisa_node=0
+fi
+if [ "$precisa_node" = 1 ]; then
+  echo "    instalando Node 20 (NodeSource)"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq ca-certificates curl gnupg
+  sudo install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg --yes
+  sudo chmod a+r /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+    | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq nodejs
+fi
+node -v
+NODE_BIN="$(command -v node)"
+
 echo "==> usuário de serviço"
 # Sem shell e sem home: este processo só precisa falar na porta 8787.
 id iris >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin iris
@@ -48,7 +73,9 @@ fi
 sudo chmod 600 "$ENVFILE"
 
 echo "==> serviço"
-sudo tee "$UNIDADE" >/dev/null <<'UNIT'
+# O caminho do node sai de `command -v`, não chutado: o NodeSource instala em
+# /usr/bin, mas uma instalação por nvm ou /usr/local quebraria um caminho fixo.
+sudo tee "$UNIDADE" >/dev/null <<UNIT
 [Unit]
 Description=Proxy da descrição e da conversa do Projeto Íris
 After=network.target
@@ -60,7 +87,7 @@ WorkingDirectory=/opt/iris/servidor
 Environment=PORTA=8787
 Environment=ORIGENS=https://iris.viegastechs.com.br
 EnvironmentFile=/etc/iris/descricao.env
-ExecStart=/usr/bin/node proxy-descricao.mjs
+ExecStart=$NODE_BIN proxy-descricao.mjs
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

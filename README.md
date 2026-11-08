@@ -431,6 +431,32 @@ tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
 Ao mudar arquivos do app, suba `VERSION` em `sw.js` — senão o navegador do testador
 continua com a versão velha em cache.
 
+> **Não rode `/opt/iris/publicar.sh` sem conferir o GitHub.** Ele faz `git pull` e
+> `rsync --delete`: se o repositório remoto estiver atrás do que está no ar, o script
+> **rebaixa o site**. Ele também copia `docs/`, `servidor/`, `simulador/` e `treino/`
+> para dentro da raiz pública, que não é o que se quer. Enquanto não tiver `--exclude`
+> para essas pastas, o `tar` acima é o caminho seguro.
+
+### O que a sgcobra aguenta (medido em 8/11/2026)
+
+| | |
+|---|---|
+| CPU | 2 vCPU |
+| RAM | 956 MB (452 MB livres), 2 GB de swap |
+| Disco | 45 GB, 40% usado |
+| Sistema | Ubuntu 22.04.5 LTS (jammy) |
+| GPU | nenhuma |
+| Node | **não instalado** — o `nodejs` do apt no jammy é a versão 12, e o SDK exige 20+ |
+
+Isso decide uma coisa importante: **não dá para rodar um modelo de visão nesta máquina.**
+Mesmo um VLM pequeno quer vários gigabytes e, sem GPU, responderia em dezenas de
+segundos — inútil para quem está parado na calçada esperando. O proxy da API cabe
+folgado (é um processo Node de ~70 MB); o modelo, não. A alternativa sem API é rodar o
+modelo **no próprio aparelho**, via transformers.js, como já é feito com o OWL-ViT —
+com o custo de qualidade e de memória descrito em "Memória: o limite real do aparelho".
+
+O `servidor/instalar.sh` instala o Node 20 pelo NodeSource quando ele falta.
+
 ---
 
 ## Piloto com usuários cegos
