@@ -35,7 +35,55 @@ Variáveis:
 | `PORTA` | 8787 |
 | `ORIGENS` | origens aceitas, separadas por vírgula |
 
+## De onde vem a chave
+
+A chave é do **Console** (`platform.claude.com`), não do app do Claude. São contas
+separadas, com cobrança separada.
+
+O detalhe que importa aqui: os planos **Max, Ultra e Team incluem créditos mensais de
+API**, que só precisam ser reivindicados. No Team são 20 dólares por assento padrão e
+100 por assento premium, somados num saldo único do time, com teto de 500. Quem
+reivindica é o Primary Owner ou um Owner do time, ligando o time a uma organização do
+Console; do lado do Console é preciso papel de Owner, Admin ou Billing. Assinantes
+novos só conseguem depois de sete dias no plano. O crédito não usado expira no fim do
+ciclo, e quando acaba as chamadas param até o mês seguinte (a menos que a organização
+compre crédito ou ligue recarga automática) — nunca cai na fatura do plano do Claude.
+Cada plano liga a **uma** organização do Console, e mudar isso depois exige falar com o
+suporte.
+
+### Quanto custa uma conversa
+
+Cada turno manda uma foto de 1024 px de largura (`LARGURA_MAX` em `nuvem.js`), o prompt
+de sistema, o contexto do detector e até seis turnos de histórico em texto. Dá da ordem
+de 2.600 tokens de entrada e 120 de saída por turno.
+
+| Modelo | Por turno | Conversa de 10 turnos | O que 20 dólares compram |
+|---|---|---|---|
+| `claude-opus-5-5` (o que está no código) | ~US$ 0,013 | ~US$ 0,13 | ~150 conversas |
+| `claude-haiku-5-5` | ~US$ 0,0003 | ~US$ 0,003 | ~6.000 conversas |
+
+São estimativas, não medições — o número real sai do `console.log` de uso que o proxy
+já escreve a cada chamada (`entrada=` e `saída=`). A troca de modelo é uma linha
+(`MODELO`, no topo do `proxy-descricao.mjs`) e é uma decisão de projeto: o Opus lê a
+cena bem melhor, que é justamente o que esta aplicação precisa; o Haiku responde mais
+rápido e cabe num crédito apertado. Em piloto com usuários, meça antes de decidir.
+
 ## Como serviço, na sgcobra
+
+O jeito curto, com tudo junto (usuário de serviço, dependências, chave em arquivo 600,
+unidade do systemd, rotas do nginx e teste de saúde):
+
+```bash
+# na sua máquina
+scp servidor/*.mjs servidor/package.json servidor/instalar.sh sgcobra:/tmp/iris-servidor/
+# no servidor
+ssh sgcobra 'cd /tmp/iris-servidor && ANTHROPIC_API_KEY=sk-ant-... bash instalar.sh'
+```
+
+O script é idempotente e **não sobrescreve a chave** se ela já existir em
+`/etc/iris/descricao.env`. O que ele faz por dentro está descrito abaixo.
+
+### O mesmo, à mão
 
 ```ini
 # /etc/systemd/system/iris-descricao.service
