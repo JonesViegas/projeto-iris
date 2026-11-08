@@ -159,6 +159,97 @@ descrever a foto de agora e avisar quando algo que foi citado antes saiu de cena
 **Custo:** cada turno da conversa manda uma foto ao modelo. Uma conversa de dez turnos são dez
 chamadas. O limite do proxy é de 20 por minuto por IP (`LIMITE` em `servidor/proxy-descricao.mjs`).
 
+## Orientação contínua (0.14)
+
+Até a 0.13 o app só dizia onde a pessoa estava quando ela apertava **Onde
+estou?**. Andando, ela ouvia inventário de objetos e mais nada. Medido no
+simulador: noventa segundos de calçada rendiam **55 falas, 36 delas com
+prefixo de alarme** — e nenhuma dizia a rua, o sentido ou quanto faltava.
+
+Agora existe um canal próprio, `Canal.ORIENTACAO`, abaixo de tudo menos da
+narração de ambiente. Ele nunca interrompe, espera a voz vagar, e prefere
+calar a repetir:
+
+- a primeira, completa: *"Você está na Rua Barão de Melgaço, indo para o
+  leste. Caminho livre à frente. Faltam 310 metros até Farmácia Central."*
+- mudou de rua: sai na hora, furando o intervalo — é a informação mais útil
+  que existe para quem não enxerga;
+- as seguintes: curtas e em rodízio, a cada 40 s andando, 90 s parado.
+
+**"Caminho livre" só é dito com a câmera entregando quadros.** Sem ver, o app
+devolve `null` e cala: afirmar que o caminho está livre sem estar olhando é o
+tipo de frase que derruba quem confia nela.
+
+O nome da rua vem do Nominatim, reconsultado só depois de 40 m andados, e uma
+falha de rede nunca apaga a rua que a pessoa já está usando para se situar.
+
+Regras em `orientar.js`, sem dependência de navegador: `node --test
+test/orientar.test.mjs`.
+
+## Por que o app repetia tanto (0.14)
+
+O teste de rua de 7/11 e o simulador mostraram a mesma coisa: andar por uma
+quadra com carros estacionados produzia *"Cuidado, carro à direita"* sem
+parar. Eram **cinco defeitos somados**, não um:
+
+1. **O app não sabia que quem andava era ele.** Caminhando a 1,2 m/s por
+   carros parados, todos "se aproximavam" a 1,2 m/s → prioridade ALTA →
+   prefixo "Cuidado". Agora o `MotionTracker` desconta o próprio passo: pelo
+   GPS (`velocidadeMs`, que o app já tinha e não usava) ou, sem GPS, pela
+   mediana do fechamento de postes, bancos e hidrantes — coisas que não andam
+   sozinhas (`IMOVEIS`).
+
+2. **O freio de repetição comparava a frase inteira, com a distância dentro.**
+   Cada meio metro gerava frase nova, e o freio nunca pegava. Agora o que
+   reabre a fala é mudar de FAIXA de proximidade — e só para o que está no
+   caminho ou vindo.
+
+3. **Gravidade e cadência estavam misturadas.** Prioridade ALTA dava direito
+   a insistir a cada 6 s. Prioridade decide a urgência da primeira menção, não
+   de quanto em quanto se insiste.
+
+4. **A chave do rastreio colidia.** Seis carros à direita dividiam a chave
+   `car|à direita`: cada quadro gravava a distância de um e comparava com a de
+   outro. Agora só o mais próximo de cada chave carrega o histórico.
+
+5. **O limiar de aproximação estava abaixo do piso de ruído.** A distância sai
+   da altura da caixa; 6% de erro na caixa a 7 m já vale meio metro, que entre
+   duas amostras vira mais de 1 m/s de "velocidade" com tudo parado. Medido:
+   carros parados fechando a 1,8–6,0 m/s contra um limiar de 0,45. Subiu para
+   0,9 m/s, com mediana de 2 s — ainda muito abaixo de uma pessoa vindo de
+   frente (~2,4 m/s) ou de um veículo (>4).
+
+Mais dois ajustes de apoio:
+
+- **Marcação constante.** O teste que marinheiro e piloto usam: o que vai te
+  acertar permanece na mesma direção; aquilo por que você passa escorrega
+  para a borda do quadro. Objeto de lado que se afasta do centro deixa de
+  contar como obstáculo no caminho.
+- **`inPath` exigia só encostar no corredor.** Qualquer objeto largo perto da
+  borda passava. Agora precisa atravancar de verdade.
+
+**Resultado medido** (90 s, mesma quadra, mesmo ruído):
+
+| | falas | com "Cuidado"/"Atenção" |
+|---|---|---|
+| antes | 55 | 36 |
+| depois | 37 | 7 |
+
+Reproduzir: `node test/simular.mjs` e `node --test "test/*.test.mjs"`.
+
+## Caixa degenerada: um suspeito dos sustos (0.14)
+
+Perseguindo o item 4 acima, o simulador entregou ao `analyzeSpatial` uma caixa
+invertida (`left` > `right`). Ele aceitou e devolveu **distância zero** — e
+zero metro é falado como *"a menos de um metro"*, o alerta mais assustador que
+o app tem, com a calçada vazia.
+
+A caixa invertida era defeito do simulador, mas a tolerância do app era real.
+`caixaSa()` agora endireita, recorta para [0,1] e recusa área desprezível; sem
+caixa aproveitável não há distância a afirmar. Isto **não explica sozinho** o
+"urso à frente" do teste noturno, que é erro de classificação — mas explica
+como um erro de caixa vira alarme de colisão.
+
 ## Ameaças e socorro (0.11)
 
 `ameacas.js` responde uma pergunta diferente da do alerta comum: não "o que está perto", mas
@@ -350,6 +441,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `lugares.js` | **Lógica pura** dos lugares familiares: aprender, reconhecer, esquecer |
 | `embedder.js` | Vetor de características do quadro (MediaPipe ImageEmbedder) |
 | `conversa.js` | **Lógica pura**: comandos de voz e memória curta da conversa |
+| `orientar.js` | **Lógica pura**: onde você está, quanto falta, caminho livre |
 | `ameacas.js` | **Lógica pura**: colisão, queda, pessoa, possível arma; mensagem de socorro |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
@@ -416,7 +508,7 @@ Atualizar:
 ```bash
 tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
     vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
-    localizar.js lugares.js embedder.js ameacas.js conversa.js \
+    localizar.js lugares.js embedder.js ameacas.js conversa.js orientar.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```

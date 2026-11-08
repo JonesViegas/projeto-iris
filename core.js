@@ -62,6 +62,21 @@ export const ALERT_LABELS = new Set([
 export const VEHICLES = new Set(["car", "motorcycle", "bus", "truck", "bicycle", "train"]);
 
 /**
+ * O que não anda sozinho. Serve de régua: se um poste está "se aproximando",
+ * quem está andando sou eu. É com estas classes que o app mede o próprio passo
+ * quando o GPS não responde — ver MotionTracker.
+ *
+ * Carro NÃO entra aqui de propósito: estacionado ele é tão imóvel quanto um
+ * poste, mas a câmera não sabe disso, e um carro em movimento usado como régua
+ * faria o app subtrair a velocidade dele e emudecer bem na hora do perigo.
+ */
+export const IMOVEIS = new Set([
+  "fire hydrant", "stop sign", "parking meter", "bench", "traffic light",
+  "potted plant", "chair", "couch", "dining table", "bed", "toilet",
+  "tv", "refrigerator", "sink",
+]);
+
+/**
  * Objetos pontiagudos ou contundentes que o COCO reconhece.
  * ATENÇÃO: o COCO **não tem classe de arma de fogo**. Possível arma de fogo é
  * assunto de ameacas.js (rótulo interno "firearm", vindo do vocabulário aberto
@@ -81,6 +96,8 @@ const DIR_ORDEM = { [Direction.FRENTE]: 0, [Direction.ESQUERDA]: 1, [Direction.D
 
 export const SPATIAL_DEFAULTS = {
   leftLimit: 0.35, rightLimit: 0.65, pathLeft: 0.30, pathRight: 0.70,
+  // quanto da largura da imagem o objeto precisa tomar do corredor
+  pathMinimo: 0.10,
   boxNear: 0.55, boxMedium: 0.25,
 };
 
@@ -88,9 +105,41 @@ export const SPATIAL_DEFAULTS = {
  * detections: [{ label, score, box: {left, top, right, bottom} }] normalizados 0..1.
  * Nesta versão web a proximidade vem da altura da caixa (sem modelo de profundidade).
  */
+/**
+ * Caixa sã, custe o que custar.
+ *
+ * Um detector pode devolver caixa invertida (left > right), de área zero ou
+ * com valor fora de [0,1] — acontece em quantização de modelo e em quadro
+ * perdido. Sem este conserto, a largura ou a altura saem negativas, a
+ * estimativa de distância pela altura devolve ZERO, e zero metro vira
+ * "a menos de um metro": o alerta de colisão mais assustador que o app tem,
+ * disparado por aritmética. É um dos suspeitos dos sustos do teste de rua.
+ *
+ * Devolve null quando a caixa não dá para aproveitar.
+ */
+export function caixaSa(b) {
+  if (!b) return null;
+  const n = (v) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null);
+  const l = n(b.left), r = n(b.right), t = n(b.top), bo = n(b.bottom);
+  if (l === null || r === null || t === null || bo === null) return null;
+  const caixa = {
+    left: Math.min(l, r), right: Math.max(l, r),
+    top: Math.min(t, bo), bottom: Math.max(t, bo),
+  };
+  // Área desprezível não carrega informação de distância nenhuma.
+  if (caixa.right - caixa.left < 1e-4 || caixa.bottom - caixa.top < 1e-4) return null;
+  return caixa;
+}
+
 export function analyzeSpatial(detections, cfg = SPATIAL_DEFAULTS) {
   return detections.map((d) => {
-    const b = d.box;
+    const b = caixaSa(d.box);
+    if (!b) {
+      return {
+        detection: d, direction: Direction.FRENTE,
+        proximity: Proximity.LONGE, inPath: false, distanceM: null,
+      };
+    }
     const cx = (b.left + b.right) / 2;
     const h = b.bottom - b.top;
     const direction = cx < cfg.leftLimit ? Direction.ESQUERDA
@@ -105,7 +154,20 @@ export function analyzeSpatial(detections, cfg = SPATIAL_DEFAULTS) {
       : (h >= cfg.boxNear ? Proximity.PERTO
         : h >= cfg.boxMedium ? Proximity.MEDIO : Proximity.LONGE);
 
-    const inPath = b.right > cfg.pathLeft && b.left < cfg.pathRight;
+    // "No meu caminho" era só encostar no corredor: `right > 0.30 && left <
+    // 0.70`. Qualquer objeto largo perto da borda passava — um carro
+    // estacionado à sua direita, cuja caixa invade cinco centésimos do
+    // corredor, era classificado como obstáculo no caminho, virava prioridade
+    // ALTA e ganhava direito a insistir a cada seis segundos. Numa rua com
+    // carros dos dois lados, isso é o app inteiro falando de estacionamento.
+    //
+    // Passa a exigir que o objeto REALMENTE atravanque: ou o centro dele está
+    // no corredor, ou ele cobre o meio da imagem, ou morde um pedaço do
+    // corredor que dê para esbarrar.
+    const corte = Math.min(b.right, cfg.pathRight) - Math.max(b.left, cfg.pathLeft);
+    const inPath = (cx > cfg.pathLeft && cx < cfg.pathRight)
+      || (b.left < 0.5 && b.right > 0.5)
+      || corte >= cfg.pathMinimo;
     return { detection: d, direction, proximity, inPath, distanceM };
   });
 }
@@ -133,8 +195,6 @@ export function alertaVaiCobrir(o) {
 }
 
 /** A frase sem o "Atenção,"/"Cuidado,": o que ela informa de fato. */
-const nucleoDaFrase = (t) => String(t).replace(/^(Atenção|Cuidado), /, "").toLowerCase();
-
 /** Mesmas regras do AlertEngine Android. */
 export class AlertEngine {
   // Intervalos apertados de propósito: quem varre o ambiente com o celular
@@ -182,13 +242,40 @@ export class AlertEngine {
       // frente, a dois metros e meio" para "Atenção, pessoa à frente, a dois
       // metros e meio" no mesmo segundo repete a frase sem informação nova.
       const ult = this.ultimoPorObjeto.get(c.streakKey);
-      // Vaivém: a estimativa oscila entre "dois metros" e "um metro e meio"
-      // com o objeto parado. Voltar à frase de antes não é novidade.
-      if (ult && !c.vindo && ult.anterior === nucleoDaFrase(c.text)
-          && nowMs - ult.tsAnterior < this.repeatParadoMs) continue;
-      if (ult && ult.nucleo === nucleoDaFrase(c.text)
-          && nowMs - ult.ts < (c.vindo ? this.repeatCooldownMs
-            : c.priority === Priority.ALTA ? this.repeatParadoMs / 2 : this.repeatParadoMs)) continue;
+      if (ult) {
+        // Antes este freio comparava a FRASE INTEIRA, com a distância dentro.
+        // Andando por um carro parado, cada meio metro gerava uma frase nova
+        // ("a oito metros", "a quatro metros e meio", "a dois metros e meio")
+        // e o freio nunca pegava: o mesmo carro era anunciado três vezes por
+        // quadra. Distância em metros não é novidade; MUDAR DE FAIXA é.
+        // Gravidade e cadência são coisas diferentes, e misturá-las era o que
+        // fazia o app repetir. A prioridade decide com que URGÊNCIA a primeira
+        // menção sai; ela não deve decidir de quanto em quanto se insiste. Um
+        // poste parado a dois metros é grave e merece "Atenção" — uma vez. Se
+        // ele continuar parado, insistir a cada seis segundos não acrescenta
+        // nada. Quem volta a falar é a mudança de faixa, logo acima, e essa só
+        // vale para o que está no caminho ou vindo.
+        // A cadência segue o que o objeto é para QUEM ANDA, não só o quanto
+        // ele é grave. Vindo na sua direção: insiste. Parado no seu caminho:
+        // insiste mais devagar, mas insiste — você vai esbarrar nele. Parado
+        // ao seu lado: é cenário, fala uma vez e cala.
+        const janela = c.vindo ? this.repeatCooldownMs
+          : (c.noCaminho === true && c.priority === Priority.ALTA) ? this.repeatParadoMs / 2
+            : this.repeatParadoMs;
+
+        // Mudar de faixa só é notícia para o que ameaça. Um carro estacionado
+        // à direita muda de faixa porque VOCÊ está andando — e a fila inteira
+        // da quadra faria isso, um carro atrás do outro.
+        const ameaca = c.noCaminho === true || c.vindo === true;
+        const aproximou = ameaca && c.prox != null && ult.prox != null && c.prox < ult.prox;
+
+        // Mudou de sentido, não de distância: o semáforo ficou verde, a pessoa
+        // agora está com um objeto pontiagudo na mão. Isso fura qualquer
+        // janela — é informação nova, não repetição.
+        const mudouSentido = ult.sig != null && ult.sig !== c.sig;
+
+        if (!aproximou && !mudouSentido && nowMs - ult.ts < janela) continue;
+      }
       if (!best || c.priority < best.priority) best = c;
     }
     if (!best) return null;
@@ -196,10 +283,8 @@ export class AlertEngine {
         && nowMs - this.lastAnyMs < this.minIntervalMs) return null;
 
     this.lastSpoken.set(best.key, nowMs);
-    const prev = this.ultimoPorObjeto.get(best.streakKey);
     this.ultimoPorObjeto.set(best.streakKey, {
-      ts: nowMs, nucleo: nucleoDaFrase(best.text),
-      anterior: prev?.nucleo ?? null, tsAnterior: prev?.ts ?? -Infinity,
+      ts: nowMs, prox: best.prox ?? null, sig: best.sig ?? null,
     });
     this.lastAnyMs = nowMs;
     return best;
@@ -229,11 +314,19 @@ export class AlertEngine {
     // Um carro estacionado à direita não é emergência; um carro vindo é.
     // A versão anterior tratava os dois como alta prioridade e o alerta
     // virava ruído constante — e ruído constante faz desligar o app.
+    // Está de lado E escorregando para a borda: você está passando por ele.
+    // A caixa de um carro estacionado a dois metros e meio toma meio quadro e
+    // invade o corredor, então a geometria sozinha o chamava de obstáculo no
+    // caminho — prioridade ALTA, com direito a insistir a cada seis segundos.
+    // Era o "Atenção, carro à direita" de dez em dez passos, a quadra inteira.
+    const passando = o.direction !== Direction.FRENTE && o.afastando === true && !vindo;
+    const noCaminho = o.inPath === true && !passando;
+
     let priority = Priority.BAIXA;
-    if (perto && (o.inPath || vindo)) priority = Priority.ALTA;
+    if (perto && (noCaminho || vindo)) priority = Priority.ALTA;
     else if (vehicle && vindo && (perto || medio)) priority = Priority.ALTA;
     else if (perto) priority = Priority.MEDIA;
-    else if (medio && (o.inPath || vindo)) priority = Priority.MEDIA;
+    else if (medio && (noCaminho || vindo)) priority = Priority.MEDIA;
 
     // Objeto cortante: anunciamos de forma hedgeada, porque falso positivo
     // aqui causa pânico — e acusa alguém injustamente. Nunca dizemos "arma".
@@ -252,6 +345,9 @@ export class AlertEngine {
         direcao: o.direction,
         dist: d,
         vindo: o.approaching === true,
+        prox: o.proximity,
+        noCaminho,
+        sig: `${label}|${o.direction}|${o.comPessoa ? "p" : ""}`,
       };
     }
 
@@ -270,6 +366,9 @@ export class AlertEngine {
     const text = prefixo ? prefixo + frase : cap(frase);
     return {
       text, priority, dist, vindo,
+      prox: o.proximity,
+      noCaminho,
+      sig: `${label}|${o.direction}|${o.cor ?? ""}`,
       streakKey: `${label}|${o.direction}`,                                  // estavel entre quadros
       key: `${label}|${o.direction}|${o.proximity}|${o.cor ?? ""}`,          // governa o repetir
     };
@@ -389,39 +488,210 @@ export function metrosFalado(d) {
 // na variação da distância entre quadros. Sem isso, todo veículo da rua
 // vira alerta de alta prioridade e o usuário desliga o app.
 
+/** Teto para a velocidade do próprio usuário: acima disto é erro de medida. */
+export const EGO_MAX_MS = 3;
+
 export class MotionTracker {
-  /** @param velocidadeAproxMs metros por segundo a partir do qual consideramos "se aproximando". */
-  constructor({ janelaMs = 1500, velocidadeAproxMs = 0.45 } = {}) {
-    Object.assign(this, { janelaMs, velocidadeAproxMs });
-    this.hist = new Map(); // chave -> { d, ts }
+  /**
+   * @param velocidadeAproxMs m/s de fechamento RELATIVO a partir do qual algo
+   *   conta como "se aproximando".
+   * @param minReferencias quantos objetos imóveis bastam para medir o passo.
+   */
+  constructor({
+    janelaMs = 1500,
+    // O PISO DE RUÍDO. A distância sai da altura da caixa, então um erro de
+    // 6% na caixa a sete metros já vale meio metro — e meio metro entre duas
+    // amostras vira mais de 1 m/s de "velocidade" com tudo parado. Medido no
+    // simulador: carros estacionados fechando a 1,8–6,0 m/s. Com o limiar em
+    // 0,45 m/s, o ruído sozinho bastava para declarar aproximação, e era isso
+    // que mantinha o "Cuidado, carro à direita" mesmo depois de descontado o
+    // passo. 0,9 m/s fica acima do ruído e muito abaixo do que importa: uma
+    // pessoa vindo de frente enquanto você anda fecha a ~2,4 m/s, e uma moto
+    // ou um carro, a mais de 4.
+    velocidadeAproxMs = 0.9,
+    minReferencias = 1, janelaEgoMs = 3000,
+    // Dois segundos de mediana, não um: metade do ruído, e uma aproximação
+    // de verdade dura muito mais que isso.
+    janelaRelMs = 2000,
+    varreduraMinPorS = 0.12,
+  } = {}) {
+    Object.assign(this, {
+      janelaMs, velocidadeAproxMs, minReferencias,
+      janelaEgoMs, janelaRelMs, varreduraMinPorS,
+    });
+    this.hist = new Map();   // chave -> { d, ts }
+    this.relHist = new Map(); // chave -> [{ v, ts }] fechamento relativo recente
+    this.amostrasEgo = [];   // [{ v, ts }] — estimativas cruas do próprio passo
+    this.egoMs = 0;          // velocidade de quem carrega o celular, suavizada
   }
 
-  /** Marca cada objeto com `approaching` e `closingMs` (m/s de fechamento). */
-  update(objects, nowMs) {
+  /**
+   * Marca cada objeto com `approaching`, `closingMs` (fechamento bruto) e
+   * `relativoMs` (fechamento descontado o próprio passo).
+   *
+   * O PORQUÊ DO DESCONTO. Andando a 1,2 m/s por uma fila de carros
+   * estacionados, todos eles "se aproximam" a 1,2 m/s — e a versão anterior
+   * marcava cada um como `approaching`, o que no AlertEngine vira prioridade
+   * ALTA e prefixo "Cuidado". Numa quadra de bairro isso rendia vinte e um
+   * "Cuidado, carro à direita" em um minuto: o alarme que ensina a ignorar
+   * alarme. Descontando o passo, carro parado fica em zero e só fala quem
+   * vem mesmo na direção da pessoa.
+   *
+   * @param egoMs velocidade do usuário em m/s, quando o GPS souber dizer.
+   */
+  update(objects, nowMs, { egoMs = null } = {}) {
     const vistos = new Set();
-    const saida = objects.map((o) => {
+
+    // A chave do histórico é `classe|direção`, e numa rua isso COLIDE: seis
+    // carros estacionados à direita dividem a mesma chave. Cada quadro, a
+    // gravação era a do último carro da lista e a comparação, a de outro —
+    // fechamento de dezenas de m/s com todo mundo parado, "se aproximando"
+    // verdadeiro e "Cuidado, carro à direita" a quadra inteira.
+    //
+    // Quem interessa para desviar é sempre o MAIS PRÓXIMO de cada chave. Ele
+    // fica com o histórico; os de trás não geram movimento. O AlertEngine já
+    // se comporta assim (guarda um candidato por streakKey), então isto só
+    // alinha o rastreio ao que o resto do app sempre fez.
+    const maisProximo = new Map();
+    for (const o of objects) {
+      if (o.distanceM == null) continue;
+      const k = `${o.detection.label}|${o.direction}`;
+      const atual = maisProximo.get(k);
+      if (!atual || o.distanceM < atual.distanceM) maisProximo.set(k, o);
+    }
+
+    // 1ª passada: o fechamento bruto de cada objeto.
+    const medidas = objects.map((o) => {
       const d = o.distanceM;
       const key = `${o.detection.label}|${o.direction}`;
       vistos.add(key);
-      if (d == null) return { ...o, approaching: false, closingMs: 0 };
+      if (d == null) return { o, key, closingMs: null };
+      // Está atrás de outro igual, na mesma direção: não é ele que você vai
+      // encontrar primeiro, e medir o movimento dele só estraga a medida.
+      if (maisProximo.get(key) !== o) return { o, key, closingMs: null, atras: true };
 
       const ant = this.hist.get(key);
-      let closingMs = 0;
+      let closingMs = null;
       if (ant && nowMs > ant.ts && nowMs - ant.ts <= this.janelaMs) {
         closingMs = (ant.d - d) / ((nowMs - ant.ts) / 1000);
       }
       // só regrava quando passou tempo suficiente para a medida ter sentido
       if (!ant || nowMs - ant.ts >= 300) this.hist.set(key, { d, ts: nowMs });
-      return { ...o, approaching: closingMs >= this.velocidadeAproxMs, closingMs };
+      return { o, key, closingMs };
+    });
+
+    this.egoMs = this.#ego(medidas, egoMs, nowMs);
+
+    // 2ª passada: o que sobra depois de descontar o próprio passo.
+    //
+    // E aqui o mesmo cuidado da régua, por um motivo diferente. A distância
+    // sai da altura da caixa, e essa relação é inversa: a dois metros, um
+    // pixel de tremor na caixa vale meio metro. Num quadro isolado isso
+    // produz "fechamento" de vários m/s com o objeto parado — e era o que
+    // ressuscitava o "Cuidado, carro à direita" bem na hora de passar por
+    // ele. Uma aproximação de verdade dura; o tremor não. Vale a mediana de
+    // cerca de um segundo.
+    const saida = medidas.map(({ o, key, closingMs, atras }) => {
+      if (closingMs == null) {
+        // Um objeto atrás de outro igual divide a chave com ele: apagar aqui
+        // destruiria o histórico de quem está na frente, justamente o que
+        // interessa. Só quem fala pela chave pode esquecê-la.
+        if (!atras) this.relHist.delete(key);
+        return {
+          ...o, approaching: false, afastando: false,
+          closingMs: 0, relativoMs: 0, varreduraPorS: 0, egoMs: this.egoMs,
+        };
+      }
+      const bruto = closingMs - this.egoMs;
+      // Sem caixa não há marcação: a varredura fica em zero e o objeto nunca
+      // é tomado por "estou passando por ele". Na dúvida, o app fala.
+      const b = o.detection?.box;
+      const excentricidade = b ? Math.abs((b.left + b.right) / 2 - 0.5) : 0.5;
+      const serie = this.relHist.get(key) ?? [];
+      serie.push({ v: bruto, e: excentricidade, ts: nowMs });
+      while (serie.length && nowMs - serie[0].ts > this.janelaRelMs) serie.shift();
+      this.relHist.set(key, serie);
+
+      const v = serie.map((a) => a.v).sort((a, b2) => a - b2);
+      const meio = Math.floor(v.length / 2);
+      const relativoMs = v.length % 2 ? v[meio] : (v[meio - 1] + v[meio]) / 2;
+
+      // Marcação constante. É o teste que marinheiro e piloto usam para saber
+      // se vão colidir, e vale igual aqui: o que vai te acertar permanece na
+      // MESMA direção enquanto cresce; aquilo por que você passa escorrega
+      // para a borda do quadro. Um carro estacionado por que você anda ao
+      // lado tem a caixa enorme — a geometria sozinha não consegue separá-lo
+      // de um obstáculo —, mas ele se afasta do centro depressa, e nada que
+      // esteja prestes a te atingir faz isso.
+      const primeiro = serie[0];
+      const dt = (nowMs - primeiro.ts) / 1000;
+      const varreduraPorS = dt >= 0.3 ? (excentricidade - primeiro.e) / dt : 0;
+
+      return {
+        ...o,
+        approaching: relativoMs >= this.velocidadeAproxMs,
+        afastando: varreduraPorS >= this.varreduraMinPorS,
+        closingMs, relativoMs, varreduraPorS, egoMs: this.egoMs,
+      };
     });
 
     for (const k of [...this.hist.keys()]) {
-      if (!vistos.has(k) && nowMs - this.hist.get(k).ts > this.janelaMs) this.hist.delete(k);
+      if (!vistos.has(k) && nowMs - this.hist.get(k).ts > this.janelaMs) {
+        this.hist.delete(k);
+        this.relHist.delete(k);
+      }
     }
     return saida;
   }
 
-  reset() { this.hist.clear(); }
+  /**
+   * A velocidade de quem carrega o celular, por duas vias.
+   *
+   * O GPS é a boa: mede o deslocamento real e não se confunde com nada na
+   * cena. Quando ele responde, manda. Sem GPS — dentro de prédio, sinal
+   * ruim, GPS desligado — sobra a imagem: poste, banco e hidrante não andam,
+   * então a mediana do fechamento DELES é o meu passo. Mediana, e não média,
+   * porque uma caixa que tremeu não pode mover a estimativa.
+   *
+   * Sem referência nenhuma devolve 0, que é exatamente o comportamento
+   * anterior: na dúvida o app fala demais, nunca de menos.
+   */
+  #ego(medidas, egoMs, nowMs) {
+    if (egoMs != null && Number.isFinite(egoMs) && egoMs > 0) {
+      this.amostrasEgo.length = 0;          // o GPS falou: a imagem não opina
+      return Math.min(egoMs, EGO_MAX_MS);
+    }
+
+    // Numa calçada real quase nunca há dois postes na tela ao mesmo tempo —
+    // exigir dois por quadro deixava a régua sem leitura e o desconto em zero,
+    // que foi o que a primeira tentativa desta correção mediu. A robustez vem
+    // do TEMPO: cada quadro contribui com o que tiver, e o que vale é a
+    // mediana de uma janela de ~1 s. Uma caixa que tremeu num quadro não move
+    // a estimativa; andar de verdade move.
+    const refs = medidas
+      .filter((m) => m.closingMs != null && IMOVEIS.has(m.o.detection.label))
+      .map((m) => m.closingMs)
+      .sort((a, b) => a - b);
+
+    if (refs.length >= this.minReferencias) {
+      const meio = Math.floor(refs.length / 2);
+      const bruta = refs.length % 2 ? refs[meio] : (refs[meio - 1] + refs[meio]) / 2;
+      this.amostrasEgo.push({ v: bruta, ts: nowMs });
+    }
+    while (this.amostrasEgo.length && nowMs - this.amostrasEgo[0].ts > this.janelaEgoMs) {
+      this.amostrasEgo.shift();
+    }
+    if (this.amostrasEgo.length === 0) return 0;
+
+    const v = this.amostrasEgo.map((a) => a.v).sort((a, b) => a - b);
+    const meio = Math.floor(v.length / 2);
+    const mediana = v.length % 2 ? v[meio] : (v[meio - 1] + v[meio]) / 2;
+    // Mediana negativa é recuo: ninguém "se afasta" por eu estar andando de ré
+    // a ponto de valer desconto. Zero.
+    return mediana > 0 ? Math.min(mediana, EGO_MAX_MS) : 0;
+  }
+
+  reset() { this.hist.clear(); this.relHist.clear(); this.amostrasEgo.length = 0; this.egoMs = 0; }
 }
 
 // ============================================================

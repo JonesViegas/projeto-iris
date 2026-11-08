@@ -66,7 +66,7 @@ test("descrição junta quadros sem duplicar e limita grupos", () => {
 // Projeto Íris — testes do que foi acrescentado
 // ============================================================
 import {
-  distanciaMetros, metrosFalado, MotionTracker, corDoSemaforo, CorSemaforo,
+  distanciaMetros, metrosFalado, MotionTracker, corDoSemaforo, CorSemaforo, caixaSa,
   analisarPiso, obstaculosDoPiso, avisoDePiso,
 } from "../core.js";
 
@@ -413,4 +413,125 @@ test("alerta: distância oscilando entre duas faixas com o objeto parado não vi
     if (a) falas.push(a.text);
   }
   assert.ok(falas.length <= 4, `falou ${falas.length} vezes: ${falas.join(" | ")}`);
+});
+
+// ============================================================
+// Descontar o próprio passo
+// ============================================================
+// O defeito que estes testes trancam: andando por uma fila de carros
+// estacionados, TODOS "se aproximavam" à velocidade da caminhada, viravam
+// prioridade ALTA e saíam com o prefixo "Cuidado". Uma quadra de bairro rendia
+// vinte e um "Cuidado, carro à direita" por minuto — o alarme que ensina a
+// ignorar alarme. Medido no simulador antes e depois.
+
+const aD = (label, metros, direction = Direction.DIREITA) =>
+  ({ detection: det(label, 0.75, 0.2, 0.95, 0.9), direction,
+     proximity: Proximity.MEDIO, inPath: false, distanceM: metros });
+
+test("passo próprio pelo GPS: carro parado deixa de 'se aproximar'", () => {
+  const t = new MotionTracker();
+  // andando a 1,2 m/s na direção de um carro parado
+  t.update([aD("car", 10)], 0, { egoMs: 1.2 });
+  let fim;
+  for (let i = 1; i <= 8; i++) {
+    fim = t.update([aD("car", 10 - i * 0.6)], i * 500, { egoMs: 1.2 });
+  }
+  assert.equal(fim[0].approaching, false,
+    "carro parado não pode contar como vindo só porque eu ando até ele");
+  assert.ok(fim[0].closingMs > 1, "o fechamento bruto existe; é o relativo que zera");
+});
+
+test("passo próprio não esconde o que vem de verdade", () => {
+  const t = new MotionTracker();
+  // eu a 1,2 m/s, o carro a 4 m/s contra: fecha a 5,2 m/s
+  t.update([aD("car", 30)], 0, { egoMs: 1.2 });
+  let fim;
+  for (let i = 1; i <= 8; i++) {
+    fim = t.update([aD("car", 30 - i * 2.6)], i * 500, { egoMs: 1.2 });
+  }
+  assert.equal(fim[0].approaching, true, "um carro vindo tem de continuar sendo um carro vindo");
+});
+
+test("sem GPS, poste e banco servem de régua para o próprio passo", () => {
+  const t = new MotionTracker();
+  const cena = (d) => [aD("fire hydrant", d, Direction.ESQUERDA), aD("car", d + 2)];
+  t.update(cena(14), 0);
+  let fim;
+  for (let i = 1; i <= 10; i++) fim = t.update(cena(14 - i * 0.6), i * 500);
+  assert.ok(t.egoMs > 0.8, `a régua devia ter medido o passo, mediu ${t.egoMs}`);
+  const carro = fim.find((o) => o.detection.label === "car");
+  assert.equal(carro.approaching, false,
+    "o hidrante prova que quem anda sou eu; o carro parado não é ameaça");
+});
+
+test("sem referência imóvel nenhuma, volta ao comportamento antigo", () => {
+  const t = new MotionTracker();
+  t.update([aD("car", 10)], 0);
+  let fim;
+  for (let i = 1; i <= 6; i++) fim = t.update([aD("car", 10 - i * 0.6)], i * 500);
+  assert.equal(t.egoMs, 0, "na dúvida o app fala demais, nunca de menos");
+  assert.equal(fim[0].approaching, true);
+});
+
+test("velocidade absurda do GPS não emudece o app", () => {
+  const t = new MotionTracker();
+  t.update([aD("car", 60)], 0, { egoMs: 120 });   // leitura de GPS claramente errada
+  assert.ok(t.egoMs <= 3, `desconto sem teto emudeceria tudo: ${t.egoMs}`);
+});
+
+test("alerta: andar por uma fila de carros parados não vira metralhadora", () => {
+  const e = new AlertEngine();
+  const t = new MotionTracker();
+  const falas = [];
+  // 30 s andando a 1,2 m/s; um carro parado a cada 8 m à direita
+  for (let ms = 0; ms <= 30000; ms += 100) {
+    const s = ms / 1000;
+    const cena = [];
+    for (let k = 0; k < 6; k++) {
+      const d = 20 - s * 1.2 + k * 8;
+      if (d > 1.5 && d < 22) cena.push(aD("car", d));
+    }
+    const objs = t.update(cena, ms, { egoMs: 1.2 });
+    const a = e.process(objs, ms);
+    if (a) falas.push(a);
+  }
+  const cuidado = falas.filter((f) => f.text.startsWith("Cuidado"));
+  assert.equal(cuidado.length, 0,
+    `carro parado não é "Cuidado": ${cuidado.map((f) => f.text).join(" | ")}`);
+  assert.ok(falas.length <= 6,
+    `${falas.length} falas em 30 s sobre carros estacionados é inventário, não guia`);
+});
+
+// ============================================================
+// Caixa degenerada
+// ============================================================
+// Um detector pode devolver caixa invertida ou de área zero. Sem conserto, a
+// altura sai negativa ou nula, a distância pela altura vira ZERO, e zero
+// metro é falado como "a menos de um metro" — o alerta mais assustador do
+// app, disparado por aritmética, com a calçada vazia. É um dos suspeitos
+// diretos dos sustos do teste de rua de 7/11.
+
+test("caixa invertida é endireitada, não aceita como está", () => {
+  const c = caixaSa({ left: 0.852, right: 0.713, top: 0.6, bottom: 0.2 });
+  assert.deepEqual(c, { left: 0.713, right: 0.852, top: 0.2, bottom: 0.6 });
+});
+
+test("caixa de área zero ou com lixo dentro é recusada", () => {
+  assert.equal(caixaSa({ left: 0.4, right: 0.4, top: 0.2, bottom: 0.8 }), null);
+  assert.equal(caixaSa({ left: 0.2, right: 0.8, top: 0.5, bottom: 0.5 }), null);
+  assert.equal(caixaSa({ left: NaN, right: 0.8, top: 0.2, bottom: 0.8 }), null);
+  assert.equal(caixaSa(null), null);
+});
+
+test("caixa degenerada nunca vira 'a menos de um metro'", () => {
+  const ruim = { label: "cat", score: 0.9,
+                 box: { left: 0.6, right: 0.4, top: 0.7, bottom: 0.7 } };
+  const o = analyzeSpatial([ruim])[0];
+  assert.equal(o.distanceM, null, "sem caixa não há distância para afirmar");
+  assert.equal(o.inPath, false);
+  const e = new AlertEngine();
+  e.process([o], 0);
+  const a = e.process([o], 100);
+  assert.ok(!a || !/menos de um metro/.test(a.text),
+    `aritmética de caixa quebrada virou alarme de colisão: ${a?.text}`);
 });

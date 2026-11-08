@@ -12,7 +12,8 @@ import { amostrarSemaforo, Segmentador } from "./vision.js";
 import { Leitor } from "./ocr.js";
 import { Diario, TipoErro } from "./diario.js";
 import { Canal, FilaDeFala, Fraseador, EstadoDaCena, NarracaoDeAmbiente } from "./fala.js";
-import { Navegador, referenciaNoLado, distanciaFalada } from "./navegacao.js";
+import { Navegador, referenciaNoLado, distanciaFalada, cardeal, distanciaM } from "./navegacao.js";
+import { Orientacao, caminhoAFrente, soAVia } from "./orientar.js";
 import { tracarRota } from "./rotas.js";
 import { RastreadorDePosicao, Bussola, ditarDestino, ouvirFala } from "./posicao.js";
 import { interpretarComando, Acao, Conversa, AJUDA_FALADA } from "./conversa.js";
@@ -24,7 +25,7 @@ import { DescritorNaNuvem, contextoLocal, AVISO_DE_CONSENTIMENTO } from "./nuvem
 import {
   barramento, Evento, registroDeRisco, buscarEmProvedores, registrarProvedorDeLugares,
 } from "./integracao.js";
-import { ondeEstou as consultarOndeEstou } from "./localizar.js";
+import { ondeEstou as consultarOndeEstou, reverso, enderecoFalado } from "./localizar.js";
 import { MemoriaDeLugares, ArmazemIndexedDB } from "./lugares.js";
 import { Embedder } from "./embedder.js";
 import { AvaliadorDeAmeacas, Nivel, mensagemDeSocorro, linkSms } from "./ameacas.js";
@@ -88,6 +89,7 @@ const ultimoAvisoPiso = new Map();
 
 const alerts = new AlertEngine();
 const motion = new MotionTracker();
+const orientacao = new Orientacao();
 const narrador = new Narrador();
 const segmentador = new Segmentador();
 const leitor = new Leitor();
@@ -350,7 +352,7 @@ function dizer(texto, canal = Canal.NARRACAO, extra = {}) {
 
 const NIVEL_DO_CANAL = {
   [Canal.ALERTA]: "alta", [Canal.NAVEGACAO]: "nav", [Canal.SISTEMA]: "info",
-  [Canal.DESCRICAO]: "info", [Canal.NARRACAO]: "info",
+  [Canal.DESCRICAO]: "info", [Canal.ORIENTACAO]: "nav", [Canal.NARRACAO]: "info",
 };
 
 function bombearFala() {
@@ -488,6 +490,8 @@ async function start() {
   alerts.reset();
   motion.reset();
   ambiente.reset();
+  orientacao.reset();
+  orientacao.iniciar(performance.now());
   fila.reset();
   describeLeft = 0;
   describeBuffer = [];
@@ -675,7 +679,12 @@ function processFrame(now) {
     : detections;
 
   let objects = analyzeSpatial(comAberto);
-  objects = motion.update(objects, ts);
+  // A velocidade do GPS é o que permite ao app saber que o carro não está
+  // vindo: sou eu que estou andando até ele. Sem GPS o MotionTracker se vira
+  // com os objetos imóveis da cena.
+  objects = motion.update(objects, ts, {
+    egoMs: rastreador.ultima?.velocidadeMs ?? null,
+  });
   objects = associarCortantes(objects);   // faca na mão herda a distância da pessoa
 
   // cor do semáforo: o COCO detecta o poste, não a luz acesa
@@ -754,6 +763,69 @@ function narrarAmbiente(objects, ts, mudanca) {
     diario.alerta({ text: fala.texto, tipo: "ambiente", priority: Priority.BAIXA });
   }
 }
+
+// ---------------- Orientação ----------------
+// A camada que faltava. Até a 0.13 o app só dizia onde a pessoa estava quando
+// ela apertava "Onde estou?"; andando, ela ouvia inventário de objetos e mais
+// nada. Um minuto de calçada rendia trinta frases e nenhuma dizia a rua.
+//
+// Esta é a fala mais barata do app em atenção e a mais cara em confiança: é
+// ela que diz "você está na Rua X, caminho livre, faltam 80 metros". Por isso
+// mora no canal mais baixo, espera a voz vagar e prefere calar a repetir.
+//
+// Roda em temporizador próprio, e não no laço de quadros, porque continua
+// fazendo sentido com a câmera desligada: rua e distância vêm do GPS.
+
+const ORIENTA_TICK_MS = 3000;
+/** Só reconsulta o nome da rua depois de andar isto: Nominatim não é de graça. */
+const RECONSULTA_VIA_M = 40;
+/** Acima disto a pessoa está andando, e a orientação se espaça menos. */
+const ANDANDO_MS = 0.4;
+
+let viaAtual = null;      // "Rua Barão de Melgaço"
+let viaPos = null;        // onde ela foi consultada
+let viaBuscando = false;
+
+async function atualizarVia(pos) {
+  if (viaBuscando || !pos) return;
+  if (viaPos && distanciaM(pos, viaPos) < RECONSULTA_VIA_M) return;
+  viaBuscando = true;
+  try {
+    const via = soAVia(enderecoFalado((await reverso(pos)) ?? {}));
+    // Só aceita a troca se veio nome: uma falha do Nominatim não pode apagar
+    // a rua que a pessoa já ouviu e está usando para se situar.
+    if (via) { viaAtual = via; viaPos = pos; }
+  } catch { /* sem rede, sem rua: a orientação segue com o que tem */ }
+  finally { viaBuscando = false; }
+}
+
+function tickOrientacao() {
+  if (state !== "ativo" && !navegador.ativo) return;
+  if (modoConversa) return;          // a pessoa está falando com o app
+
+  const pos = rastreador.ultima;
+  if (pos) atualizarVia(pos);
+
+  const rumo = bussola.disponivel && bussola.graus != null ? bussola.graus : (pos?.rumoGraus ?? null);
+  const faltamM = navegador.ativo ? navegador.restanteM(pos) : null;
+
+  const f = orientacao.proxima(performance.now(), {
+    via: viaAtual,
+    cardeal: rumo != null && Number.isFinite(rumo) ? cardeal(rumo) : null,
+    destino: navegador.ativo ? rotaAtual?.destino?.nome ?? null : null,
+    faltamM,
+    andando: (pos?.velocidadeMs ?? 0) >= ANDANDO_MS,
+    // Com a câmera parada o app não afirma que o caminho está livre: dizer
+    // isso sem estar vendo é o tipo de frase que derruba quem confia nela.
+    caminho: caminhoAFrente(ultimosObjetos, { vendo: state === "ativo" }),
+  });
+  if (!f) return;
+  if (dizer(f.texto, Canal.ORIENTACAO, { chave: f.chave })) {
+    diario.alerta({ text: f.texto, tipo: "orientacao", priority: Priority.BAIXA });
+  }
+}
+
+setInterval(tickOrientacao, ORIENTA_TICK_MS);
 
 function describe() {
   if (state !== "ativo") { unlockAudio(); speak("Inicie a percepção primeiro.", true); return; }

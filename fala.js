@@ -26,7 +26,8 @@ export const Canal = {
   NAVEGACAO: 1,   // manobra da rota — tem hora certa
   SISTEMA: 2,     // resposta a um toque do usuário (ele está esperando)
   DESCRICAO: 3,   // "o que tem aqui?" — longo, pode ser cortado
-  NARRACAO: 4,    // ambiente em volta — o primeiro a calar
+  ORIENTACAO: 4,  // onde você está e quanto falta — tranquiliza, nunca interrompe
+  NARRACAO: 5,    // ambiente em volta — o primeiro a calar
 };
 
 /** Quanto tempo uma fala ainda vale, por canal, se não puder sair na hora. */
@@ -35,6 +36,9 @@ export const VALIDADE_MS = {
   [Canal.NAVEGACAO]: 2500,   // a manobra tem janela; fora dela, cala
   [Canal.SISTEMA]: 8000,     // o usuário pediu: vale a pena esperar
   [Canal.DESCRICAO]: 6000,
+  // Orientação envelhece devagar: a rua continua sendo a mesma rua daqui a
+  // cinco segundos. É a única fala do app que vale a pena esperar a voz vagar.
+  [Canal.ORIENTACAO]: 5000,
   [Canal.NARRACAO]: 1500,
 };
 
@@ -44,6 +48,7 @@ export const INTERVALO_MS = {
   [Canal.NAVEGACAO]: 1500,
   [Canal.SISTEMA]: 300,
   [Canal.DESCRICAO]: 500,
+  [Canal.ORIENTACAO]: 10000, // a própria Orientacao já se espaça; isto é o teto
   [Canal.NARRACAO]: 2200,    // folgado de propósito: narração é tempero
 };
 
