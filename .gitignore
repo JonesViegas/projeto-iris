@@ -27,3 +27,5 @@ servidor/node_modules/
 servidor/package-lock.json
 *.env
 __pycache__/
+simulador/simulador.html
+simulador/simulador-artifact.html
