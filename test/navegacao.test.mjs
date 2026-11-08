@@ -262,3 +262,67 @@ test("regressão: trecho novo sem virada não rende duas frases", () => {
   assert.ok(!evs.some((e) => e.tipo === "manobra"),
     "seguir reto não é manobra: o anúncio do trecho novo já diz tudo");
 });
+
+// ---------------- Orientação (0.10) ----------------
+
+test("alinhamento: parado e virado para o lado errado, o app guia o giro e confirma", () => {
+  const n = new Navegador();
+  const r = rotaReta();            // primeiro trecho vai para o leste (90°)
+  n.iniciar(r);
+  const p = { ...r.passos[0].inicio, precisaoM: 5, velocidadeMs: 0 };
+  const um = n.atualizar(p, 0, 0);           // virado para o norte
+  assert.equal(um[0].tipo, "alinhar");
+  assert.match(um[0].texto, /vire à direita/);
+  assert.equal(n.atualizar(p, 40, 1000).length, 0, "girando: não repete a cada leitura");
+  const ok = n.atualizar(p, 85, 2000);
+  assert.equal(ok[0].tipo, "alinhado");
+  assert.match(ok[0].texto, /^Isso/);
+});
+
+test("alinhamento: de costas pede meia-volta; lembrete muda a frase e é raro", () => {
+  const n = new Navegador();
+  const r = rotaReta();
+  n.iniciar(r);
+  const p = { ...r.passos[0].inicio, precisaoM: 5, velocidadeMs: 0 };
+  assert.match(n.atualizar(p, 270, 0)[0].texto, /meia-volta/);
+  const textos = [];
+  for (let t = 1000; t <= 60000; t += 1000) for (const e of n.atualizar(p, 200, t)) textos.push(e.texto);
+  assert.ok(textos.length <= 2, `lembrou ${textos.length} vezes`);
+  assert.equal(new Set(textos).size, textos.length, "lembretes não podem ser iguais");
+});
+
+test("alinhamento: já alinhado ou andando, não fala nada", () => {
+  const n = new Navegador();
+  const r = rotaReta();
+  n.iniciar(r);
+  assert.equal(n.atualizar({ ...r.passos[0].inicio, precisaoM: 5, velocidadeMs: 0 }, 95, 0).length, 0);
+});
+
+test("confirmação de caminho: trecho longo não fica mudo, e as frases variam", () => {
+  const n = new Navegador();
+  const a = BASE, b = mover(a, 0, 400);
+  n.iniciar({
+    destino: { nome: "Praça", ...b }, distanciaM: 400, duracaoS: 330,
+    passos: [{ instrucao: "Siga pela Rua A", via: "Rua A", distanciaM: 400, inicio: a, fim: b, polilinha: [a, b] }],
+  });
+  const falas = [];
+  for (let m = 0, t = 0; m < 360; m += 1.2, t += 1000) {
+    for (const e of n.atualizar({ ...mover(a, 0, m), precisaoM: 5, velocidadeMs: 1.2 }, 90, t)) falas.push(e);
+  }
+  const conf = falas.filter((e) => e.tipo === "confirmar");
+  assert.ok(conf.length >= 2, "400 m sem nenhuma confirmação deixa a pessoa em dúvida");
+  assert.ok(conf.length <= 6, `confirmou ${conf.length} vezes: virou ruído`);
+  assert.equal(new Set(conf.map((c) => c.texto)).size, conf.length, "confirmações repetidas");
+  for (const c of conf) assert.match(c.texto, /metros/, "toda confirmação traz o que falta");
+});
+
+test("fora de rota diz para que lado a rota fica", () => {
+  const n = new Navegador();
+  const r = rotaReta();
+  n.iniciar(r);
+  // 60 m ao norte da Rua A (que corre para o leste), pessoa virada para o leste
+  const fora = { ...mover(r.passos[0].inicio, 60, 100), precisaoM: 5, velocidadeMs: 1.2 };
+  n.atualizar(fora, 90, 0); n.atualizar(fora, 90, 1000);
+  const ev = n.atualizar(fora, 90, 2000);
+  assert.match(ev[0].texto, /A rota fica à sua direita, a uns 60 metros/);
+});

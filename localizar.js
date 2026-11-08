@@ -25,26 +25,16 @@
 // Tudo o que decide é função pura e testada; o que fala com a rede recebe o
 // `fetch` por parâmetro para poder ser testado sem rede.
 
-import { distanciaM, rumo, diferencaAngular, cardeal, distanciaFalada } from "./navegacao.js";
+import {
+  distanciaM, rumo, diferencaAngular, cardeal, distanciaFalada, direcaoRelativa,
+} from "./navegacao.js";
 
 // ============================================================
 // Direção relativa
 // ============================================================
 
-/**
- * Converte a diferença entre o rumo da pessoa e o rumo do alvo em palavras.
- * Faixas largas de propósito: a bússola do celular treme 15 a 20 graus, e
- * "levemente à direita" com esse erro é ruído.
- */
-export function direcaoRelativa(delta) {
-  const a = Math.abs(delta);
-  const lado = delta < 0 ? "esquerda" : "direita";
-  if (a <= 25) return "à sua frente";
-  if (a <= 65) return `à frente, à ${lado}`;
-  if (a <= 115) return `à sua ${lado}`;
-  if (a <= 155) return `atrás, à ${lado}`;
-  return "atrás de você";
-}
+// direcaoRelativa mora em navegacao.js (a rota também precisa dela).
+export { direcaoRelativa };
 
 /**
  * Onde um ponto está em relação à pessoa. Com rumo conhecido, devolve lado;
@@ -235,6 +225,49 @@ export function fraseOndeEstou({
 }
 
 // ============================================================
+// Perguntou de novo
+// ============================================================
+// Quem aperta "Onde estou?" duas vezes em poucos minutos não quer ouvir o
+// mesmo parágrafo. Quer saber o que MUDOU: se andou, se girou, onde ficou a
+// referência agora. A segunda resposta é curta e só traz orientação nova.
+
+export const REPETICAO_JANELA_MS = 5 * 60 * 1000;
+export const MOVEU_M = 15;
+export const GIROU_GRAUS = 30;
+
+export function fraseOndeEstouDeNovo(anterior, atual) {
+  const frases = [];
+  const moveu = anterior.pos && atual.pos ? distanciaM(anterior.pos, atual.pos) : 0;
+  const mesmaRua = anterior.endereco && atual.endereco
+    && anterior.endereco.split(",")[0] === atual.endereco.split(",")[0];
+
+  if (atual.familiar && atual.familiar !== anterior.familiar) frases.push(`Este lugar parece ser ${atual.familiar}.`);
+
+  if (!mesmaRua && atual.endereco) frases.push(`Agora você está na ${atual.endereco}.`);
+  else if (moveu >= MOVEU_M) frases.push(`Você andou uns ${Math.round(moveu / 5) * 5} metros e continua na ${atual.endereco.split(",")[0]}.`);
+  else frases.push("Você continua no mesmo ponto.");
+
+  const temRumo = atual.rumoPessoa != null && Number.isFinite(atual.rumoPessoa);
+  const tinhaRumo = anterior.rumoPessoa != null && Number.isFinite(anterior.rumoPessoa);
+  if (temRumo && (!tinhaRumo || Math.abs(diferencaAngular(anterior.rumoPessoa, atual.rumoPessoa)) >= GIROU_GRAUS)) {
+    frases.push(`Agora virado para o ${cardeal(atual.rumoPessoa)}.`);
+  }
+
+  const refs = atual.referencias ?? [];
+  if (refs.length) {
+    // Parado e sem girar: só a referência principal, como âncora.
+    const girou = frases.some((f) => f.startsWith("Agora virado"));
+    const n = moveu >= MOVEU_M || girou || !mesmaRua ? 3 : 1;
+    frases.push(`${n === 1 ? "Referência mais útil" : "Perto de você"}: ${refs.slice(0, n).map(referenciaFalada).join("; ")}.`);
+  }
+  if (atual.precisaoM != null && atual.precisaoM > PRECISAO_RUIM_M
+      && !(anterior.precisaoM > PRECISAO_RUIM_M)) {
+    frases.push("O GPS piorou: pode ser a rua ao lado.");
+  }
+  return frases.join(" ");
+}
+
+// ============================================================
 // Rede (com fetch injetável)
 // ============================================================
 
@@ -282,7 +315,9 @@ export async function pontosProximos(pos, { fetch: f = globalThis.fetch, raioM =
  * endereço ainda há referências. Devolve a frase e os dados, para o app
  * mostrar na tela e mandar como contexto à descrição detalhada.
  */
-export async function ondeEstou(pos, { rumoPessoa = null, familiar = null, fetch: f, raioM = 80 } = {}) {
+export async function ondeEstou(pos, {
+  rumoPessoa = null, familiar = null, fetch: f, raioM = 80, anterior = null, agoraMs = Date.now(),
+} = {}) {
   const [end, nos] = await Promise.allSettled([
     reverso(pos, { fetch: f }),
     pontosProximos(pos, { fetch: f, raioM }),
@@ -291,6 +326,10 @@ export async function ondeEstou(pos, { rumoPessoa = null, familiar = null, fetch
   const referencias = nos.status === "fulfilled"
     ? selecionarReferencias(nos.value, pos, rumoPessoa, { raioM })
     : [];
-  const texto = fraseOndeEstou({ endereco, precisaoM: pos.precisaoM ?? null, rumoPessoa, referencias, familiar });
-  return { texto, endereco, referencias, falhas: [end, nos].filter((x) => x.status === "rejected").length };
+  const estado = { endereco, referencias, rumoPessoa, familiar, pos, precisaoM: pos.precisaoM ?? null, ts: agoraMs };
+  const repetida = anterior && agoraMs - anterior.ts < REPETICAO_JANELA_MS && endereco;
+  const texto = repetida
+    ? fraseOndeEstouDeNovo(anterior, estado)
+    : fraseOndeEstou({ endereco, precisaoM: pos.precisaoM ?? null, rumoPessoa, referencias, familiar });
+  return { texto, endereco, referencias, estado, falhas: [end, nos].filter((x) => x.status === "rejected").length };
 }

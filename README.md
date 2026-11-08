@@ -86,7 +86,36 @@ frente numa fala só. Sem bússola, usa pontos cardeais e diz isso.
 aprende com 8 quadros (vetores do MobileNet-V3, nunca a foto) e passa a dizer "Este lugar parece ser
 a cozinha" — inclusive onde não há GPS. Lugar memorizado com GPS bom vira destino: "Ir para casa".
 
+**A segunda pergunta não repete a primeira.** Quem toca de novo em poucos minutos ouve só o que
+mudou: "Você continua no mesmo ponto. Agora virado para o leste. Perto de você: faixa de pedestre,
+à sua esquerda…".
+
 Arquitetura, decisões e próximas etapas de ML: [`docs/ROTEIRO-ML.md`](docs/ROTEIRO-ML.md).
+
+### Orientar, não repetir (0.10)
+
+- **Antes de sair**, parada e virada para o lado errado, a pessoa ouve *"Antes de sair, vire à
+  direita, devagar, até eu dizer: isso."* e, quando acerta, *"Isso. Agora siga em frente."*
+- **Em trecho longo**, o silêncio de minutos virou confirmação curta e variada, sempre com o que
+  falta: *"Caminho certo. Faltam 120 metros até a Avenida Getúlio Vargas."*
+- **Saiu do caminho**: além de constatar, diz para que lado a rota ficou — *"A rota fica atrás de
+  você, a uns 35 metros."* (Esta frase não chegava a ser falada no app: corrigido.)
+- **Recálculo** não repete a abertura inteira: *"Nova rota, 140 metros no total. Siga…"*
+- **Alertas**: "Pessoa à frente, a dois metros e meio" seguido de "Atenção, pessoa à frente, a
+  dois metros e meio" no mesmo segundo virou uma frase só; objeto parado à mesma distância não
+  repete a cada 3 s; e a narração não anuncia o que o alerta vai anunciar logo depois.
+
+### Simulador de voz no celular
+
+`simulador/` toca no navegador, com a voz do aparelho, o que o app diria em nove cenas (onde estou,
+rota, travessia, desvio, sem bússola, câmera). Roda o mesmo código do app, sem câmera nem GPS.
+
+```bash
+bash simulador/montar.sh      # gera simulador/simulador.html, arquivo único
+```
+
+Para testar no celular, suba `simulador/simulador.html` junto com o app
+(`https://iris.viegastechs.com.br/simulador/simulador.html`) ou abra o arquivo direto.
 
 ---
 
@@ -237,6 +266,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `sw.js` | Cache para uso offline |
 | `test/layout.test.mjs` | Guarda do grid: a câmera precisa ter altura |
 | `test/carga.test.mjs` | Carrega o `app.js` num DOM de mentira e vê se sobrevive |
+| `simulador/` | Simulador de voz para o celular: motor, página e montagem |
 
 Toda regra de decisão mora em `core.js`, `fala.js` e `navegacao.js` — sem dependência de
 navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GPS e a rede.
@@ -246,7 +276,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/*.test.mjs      # 89 testes: lógica, fala, navegação, layout e carga
+node --test test/*.test.mjs      # 100 testes: lógica, fala, navegação, layout e carga
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé

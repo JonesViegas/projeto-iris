@@ -86,9 +86,46 @@ export function distanciaAPolilinha(p, pontos) {
   return min;
 }
 
+/** Ponto da linha quebrada mais perto de p: para dizer "a rota fica à sua esquerda". */
+export function pontoMaisProximo(p, pontos) {
+  if (!pontos?.length) return null;
+  if (pontos.length === 1) return pontos[0];
+  const mLat = 111320;
+  const mLng = 111320 * Math.cos(rad(p.lat));
+  let melhor = null;
+  let min = Infinity;
+  for (let i = 0; i < pontos.length - 1; i++) {
+    const a = pontos[i], b = pontos[i + 1];
+    const px = (p.lng - a.lng) * mLng, py = (p.lat - a.lat) * mLat;
+    const bx = (b.lng - a.lng) * mLng, by = (b.lat - a.lat) * mLat;
+    const len2 = bx * bx + by * by;
+    const t = len2 ? Math.max(0, Math.min(1, (px * bx + py * by) / len2)) : 0;
+    const d = Math.hypot(px - t * bx, py - t * by);
+    if (d < min) {
+      min = d;
+      melhor = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+    }
+  }
+  return melhor;
+}
+
 // ============================================================
 // Como se fala uma direção
 // ============================================================
+
+/**
+ * Onde algo está em relação a quem aponta para `delta` graus de diferença.
+ * Faixas largas de propósito: a bússola do celular treme 15 a 20 graus.
+ */
+export function direcaoRelativa(delta) {
+  const a = Math.abs(delta);
+  const lado = delta < 0 ? "esquerda" : "direita";
+  if (a <= 25) return "à sua frente";
+  if (a <= 65) return `à frente, à ${lado}`;
+  if (a <= 115) return `à sua ${lado}`;
+  if (a <= 155) return `atrás, à ${lado}`;
+  return "atrás de você";
+}
 
 export const CARDEAIS = [
   "norte", "nordeste", "leste", "sudeste", "sul", "sudoeste", "oeste", "noroeste",
@@ -175,6 +212,14 @@ export const RAIO_CHEGADA_M = 15;
 export const DIST_PREPARAR_M = 25;
 export const DIST_EXECUTAR_M = 8;
 export const PRECISAO_RUIM_M = 30;       // acima disso o GPS não sustenta manobra
+// Confirmação de caminho: em trecho longo, silêncio de minutos faz a pessoa
+// duvidar se ainda está certa — e quem duvida para, ou volta. Uma frase curta
+// de progresso a cada tanto, sempre com informação nova (o quanto falta).
+export const CONFIRMAR_A_CADA_M = 60;
+export const CONFIRMAR_INTERVALO_MIN_MS = 40000;
+// Alinhamento antes de sair: diferença acima disto pede giro guiado.
+export const ALINHAR_ACIMA_GRAUS = 35;
+export const ALINHADO_GRAUS = 20;
 
 /**
  * Consome posições e devolve eventos de fala. Não fala, não acessa GPS, não
@@ -208,9 +253,24 @@ export class Navegador {
     this.avisouPrecisao = false;
     this.recalculos = 0;
     this.ultimoForaMs = null;
+    this.#zerarOrientacao();
   }
 
-  iniciar(rota) {
+  #zerarOrientacao() {
+    this.alinhamento = "pendente";   // pendente | girando | feito
+    this.alinharDesdeMs = null;
+    this.lembretesDeGiro = 0;
+    this.ultimaFalaMs = null;
+    this.ultimaFalaPos = null;
+    this.confirmacoes = 0;
+  }
+
+  /**
+   * `recalculo: true` encurta a abertura: quem acabou de ouvir "Rota traçada
+   * até a farmácia, 320 metros, 5 minutos" não precisa ouvir tudo de novo —
+   * precisa saber para onde ir agora.
+   */
+  iniciar(rota, { recalculo = false } = {}) {
     this.rota = rota;
     this.passo = 0;
     this.fase = FaseDoPasso.SEGUINDO;
@@ -219,11 +279,16 @@ export class Navegador {
     this.avisouPrecisao = false;
     this.recalculos = 0;
     this.ultimoForaMs = null;
+    this.#zerarOrientacao();
     const p = rota?.passos?.[0];
     const resumo = `Rota traçada até ${rota.destino.nome}: ${distanciaFalada(rota.distanciaM)}`
       + (rota.duracaoS ? `, cerca de ${Math.max(1, Math.round(rota.duracaoS / 60))} minutos a pé` : "")
       + ".";
     const primeiro = p ? ` ${this.#frasePasso(p, p.distanciaM, null)}` : "";
+    if (recalculo) {
+      return { tipo: "inicio", texto: `Nova rota, ${distanciaFalada(rota.distanciaM)} no total.${primeiro}`,
+        urgente: false, chave: "nav:inicio" };
+    }
     return { tipo: "inicio", texto: resumo + primeiro, urgente: false, chave: "nav:inicio" };
   }
 
@@ -243,6 +308,95 @@ export class Navegador {
    */
   atualizar(posicao, rumoDispositivo, agoraMs) {
     if (!this.ativo || !posicao) return [];
+    if (this.ultimaFalaMs === null) { this.ultimaFalaMs = agoraMs; this.ultimaFalaPos = posicao; }
+
+    const andando = (posicao.velocidadeMs ?? 0) > 0.6;
+    const alinhar = this.#alinhar(posicao, rumoDispositivo, andando, agoraMs);
+    let eventos = alinhar ? [alinhar] : this.#atualizarBase(posicao, rumoDispositivo, agoraMs);
+
+    if (!eventos.some((e) => e?.texto)) {
+      const conf = this.#confirmarCaminho(posicao, agoraMs);
+      if (conf) eventos = [...eventos, conf];
+    }
+    if (eventos.some((e) => e?.texto)) { this.ultimaFalaMs = agoraMs; this.ultimaFalaPos = posicao; }
+    return eventos;
+  }
+
+  /**
+   * Antes do primeiro passo: a pessoa parada, com bússola, virada para o lado
+   * errado. "Siga pela Rua X" não diz para que lado ela está. Aqui o app guia
+   * o giro e confirma com uma palavra quando ela acerta — como faz um
+   * instrutor de orientação e mobilidade.
+   */
+  #alinhar(posicao, rumoDispositivo, andando, agoraMs) {
+    if (this.alinhamento === "feito") return null;
+    const passo = this.passoAtual;
+    if (andando || rumoDispositivo == null || !passo?.fim || this.passo !== 0) {
+      // Começou a andar (ou não há bússola): alinhamento deixa de fazer sentido.
+      if (andando || this.passo !== 0) this.alinhamento = "feito";
+      return null;
+    }
+    const alvo = rumo(posicao, passo.fim);
+    const delta = diferencaAngular(rumoDispositivo, alvo);
+    const a = Math.abs(delta);
+
+    if (this.alinhamento === "pendente") {
+      if (a <= ALINHAR_ACIMA_GRAUS) { this.alinhamento = "feito"; return null; }
+      this.alinhamento = "girando";
+      this.alinharDesdeMs = agoraMs;
+      const giro = a > 150 ? "dê meia-volta" : `vire ${delta < 0 ? "à esquerda" : "à direita"}`;
+      return { tipo: "alinhar", texto: `Antes de sair, ${giro}, devagar, até eu dizer: isso.`,
+        urgente: false, chave: "nav:alinhar" };
+    }
+
+    // girando
+    if (a <= ALINHADO_GRAUS) {
+      this.alinhamento = "feito";
+      return { tipo: "alinhado", texto: "Isso. Agora siga em frente.", urgente: true, chave: "nav:alinhado" };
+    }
+    // Lembrete raro e com outra informação: para que lado falta girar e quanto.
+    if (agoraMs - this.alinharDesdeMs > 7000 && this.lembretesDeGiro < 2) {
+      this.lembretesDeGiro++;
+      this.alinharDesdeMs = agoraMs;
+      const lado = delta < 0 ? "à esquerda" : "à direita";
+      const quanto = a > 120 ? "ainda bastante" : a > 60 ? "mais um pouco" : "só mais um pouco";
+      const texto = this.lembretesDeGiro === 1
+        ? `Continue virando ${lado}, ${quanto}.`
+        : `Gire ${quanto} ${lado}. Quando estiver certo, eu aviso.`;
+      return { tipo: "alinhar", texto,
+        urgente: false, chave: `nav:alinhar:${this.lembretesDeGiro}` };
+    }
+    return null;
+  }
+
+  /** Progresso em trecho longo: frase curta, variada, sempre com o que falta. */
+  #confirmarCaminho(posicao, agoraMs) {
+    const passo = this.passoAtual;
+    if (!passo?.fim || this.alinhamento === "girando") return null;
+    if (posicao.precisaoM != null && posicao.precisaoM > this.precisaoRuim) return null;
+    if (this.foraSeguidos > 0) return null;
+    if (distanciaM(posicao, this.ultimaFalaPos) < CONFIRMAR_A_CADA_M) return null;
+    if (agoraMs - this.ultimaFalaMs < CONFIRMAR_INTERVALO_MIN_MS) return null;
+    const aoFim = distanciaM(posicao, passo.fim);
+    if (aoFim < this.distPreparar + 15) return null;   // a manobra já vai falar
+
+    const ultimo = this.passo >= this.rota.passos.length - 1;
+    const proximo = this.rota.passos[this.passo + 1];
+    const alvo = ultimo ? this.rota.destino.nome
+      : proximo?.via && proximo.via !== passo.via ? `a ${proximo.via}` : "a próxima esquina";
+    const d = distanciaFalada(aoFim);
+    const via = passo.via ? `pela ${passo.via}` : "em frente";
+    const modelos = [
+      `Caminho certo. Faltam ${d} até ${alvo}.`,
+      `Continue ${via}; ${alvo} em ${d}.`,
+      `Mais ${d} até ${alvo}.`,
+    ];
+    const texto = modelos[this.confirmacoes % modelos.length];
+    this.confirmacoes++;
+    return { tipo: "confirmar", texto, urgente: false, chave: `nav:conf:${this.passo}:${this.confirmacoes}` };
+  }
+
+  #atualizarBase(posicao, rumoDispositivo, agoraMs) {
     const eventos = [];
     const passo = this.passoAtual;
     if (!passo) return [];
@@ -288,7 +442,7 @@ export class Navegador {
         this.foraSeguidos = 0;
         this.ultimoForaMs = agoraMs;
         this.recalculos++;
-        eventos.push(this.#eventoForaDeRota());
+        eventos.push(this.#eventoForaDeRota(posicao, passo, rumoAtual));
         return eventos;
       }
     } else {
@@ -353,18 +507,29 @@ export class Navegador {
     return agoraMs - this.ultimoForaMs >= espera;
   }
 
-  #eventoForaDeRota() {
+  /** Para que lado fica a rota: orientação, não só constatação. */
+  #ondeFicaARota(posicao, passo, rumoAtual) {
+    const alvo = pontoMaisProximo(posicao, passo.polilinha ?? [passo.inicio, passo.fim]);
+    if (!alvo) return "";
+    const d = distanciaM(posicao, alvo);
+    const r = rumo(posicao, alvo);
+    const onde = rumoAtual != null ? direcaoRelativa(diferencaAngular(rumoAtual, r)) : `ao ${cardeal(r)}`;
+    return ` A rota fica ${onde}, a uns ${Math.round(d / 5) * 5} metros.`;
+  }
+
+  #eventoForaDeRota(posicao, passo, rumoAtual) {
     if (this.recalculos === 1) {
       return {
         tipo: "fora", recalcular: true,
-        texto: "Você saiu do caminho. Recalculando a rota.",
+        texto: `Você saiu do caminho.${this.#ondeFicaARota(posicao, passo, rumoAtual)} Recalculando.`,
         urgente: true, chave: `nav:fora:${this.recalculos}`,
       };
     }
     if (this.recalculos === 2) {
       return {
         tipo: "fora", recalcular: true,
-        texto: "Ainda fora da rota. Pare um instante, deixe o GPS estabilizar e tento de novo.",
+        texto: `Ainda fora da rota.${this.#ondeFicaARota(posicao, passo, rumoAtual)} `
+          + "Pare um instante, deixe o GPS estabilizar e tento de novo.",
         urgente: false, chave: `nav:fora:${this.recalculos}`,
       };
     }

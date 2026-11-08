@@ -94,3 +94,37 @@ test("ondeEstou: uma fonte falhando não derruba a outra", async () => {
   assert.equal(r.falhas, 1);
   assert.match(r.texto, /Não achei pontos de referência/);
 });
+
+test("perguntou de novo parado: resposta curta, sem repetir o parágrafo", async () => {
+  const resp = (url) => String(url).includes("nominatim")
+    ? { ok: true, json: async () => ({ address: { road: "Rua A", house_number: "100", suburb: "Centro" } }) }
+    : { ok: true, json: async () => ({ elements: [
+        { lat: norte(20).lat, lon: AQUI.lng, tags: { highway: "crossing" } },
+        { lat: AQUI.lat, lon: leste(15).lng, tags: { amenity: "pharmacy" } },
+      ] }) };
+  const f = async (u) => resp(u);
+  const um = await ondeEstou(AQUI, { rumoPessoa: 0, fetch: f, agoraMs: 0 });
+  const dois = await ondeEstou(AQUI, { rumoPessoa: 5, fetch: f, agoraMs: 30000, anterior: um.estado });
+  assert.match(dois.texto, /continua no mesmo ponto/);
+  assert.ok(dois.texto.length < um.texto.length / 1.5, `segunda resposta longa demais: ${dois.texto}`);
+  assert.doesNotMatch(dois.texto, /bairro/);
+});
+
+test("perguntou de novo depois de girar: diz o novo rumo e onde as referências ficaram", async () => {
+  const f = async (u) => String(u).includes("nominatim")
+    ? { ok: true, json: async () => ({ address: { road: "Rua A" } }) }
+    : { ok: true, json: async () => ({ elements: [{ lat: norte(20).lat, lon: AQUI.lng, tags: { highway: "crossing" } }] }) };
+  const um = await ondeEstou(AQUI, { rumoPessoa: 0, fetch: f, agoraMs: 0 });
+  const dois = await ondeEstou(AQUI, { rumoPessoa: 90, fetch: f, agoraMs: 20000, anterior: um.estado });
+  assert.match(dois.texto, /Agora virado para o leste/);
+  assert.match(dois.texto, /faixa de pedestre, à sua esquerda/);
+});
+
+test("depois de muito tempo, volta a dar a resposta completa", async () => {
+  const f = async (u) => String(u).includes("nominatim")
+    ? { ok: true, json: async () => ({ address: { road: "Rua A" } }) }
+    : { ok: true, json: async () => ({ elements: [] }) };
+  const um = await ondeEstou(AQUI, { rumoPessoa: 0, fetch: f, agoraMs: 0 });
+  const dois = await ondeEstou(AQUI, { rumoPessoa: 0, fetch: f, agoraMs: 10 * 60 * 1000, anterior: um.estado });
+  assert.match(dois.texto, /^Você está na Rua A/);
+});

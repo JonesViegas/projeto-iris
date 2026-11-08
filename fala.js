@@ -15,7 +15,9 @@
 //
 // Sem dependência de navegador: `node --test test/fala.test.mjs`.
 
-import { NOMES, OBJETOS_CORTANTES, numero, metrosFalado, Verbosidade } from "./core.js";
+import {
+  NOMES, OBJETOS_CORTANTES, numero, metrosFalado, Verbosidade, alertaVaiCobrir,
+} from "./core.js";
 
 // ---------- Canais ----------
 // A ordem é a prioridade. Menor número vence.
@@ -366,7 +368,14 @@ export class NarracaoDeAmbiente {
     // perde junto o alerta que importava.
     if (!m.mudou && this.estado.estavel(nowMs)) return null;
 
-    const livres = this.narrador.candidatos(objects, nowMs, nivel);
+    // O que o alerta vai anunciar, a narração não anuncia antes: "Semáforo à
+    // frente." seguido de "Semáforo vermelho à frente." é a mesma coisa duas
+    // vezes. Compara por classe e direção, que é o que as chaves carregam.
+    const cobertos = new Set(objects.filter(alertaVaiCobrir)
+      .map((o) => `${o.detection.label}|${o.direction}`));
+    const cobre = (c) => [...cobertos].some((k) => c.chave?.endsWith(k) || c.alvo === k
+      || (c.tipo === "passando" && c.chave === `passa:${k.split("|")[0]}`));
+    const livres = this.narrador.candidatos(objects, nowMs, nivel).filter((c) => !cobre(c));
     if (livres.length === 0) return null;
 
     // "se aproximando" e "passando" são acontecimentos: merecem frase própria,

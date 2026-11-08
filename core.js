@@ -111,15 +111,40 @@ export function analyzeSpatial(detections, cfg = SPATIAL_DEFAULTS) {
 export const Priority = { ALTA: 0, MEDIA: 1, BAIXA: 2 };
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
+/**
+ * O alerta vai falar deste objeto? (prioridade média ou alta). A narração
+ * usa isto para não anunciar, um quadro antes, o mesmo objeto que o alerta
+ * vai anunciar logo em seguida — "Semáforo à frente." e meio segundo depois
+ * "Semáforo vermelho à frente." é a mesma coisa dita duas vezes.
+ */
+export function alertaVaiCobrir(o) {
+  const label = o?.detection?.label;
+  if (!ALERT_LABELS.has(label)) return false;
+  if (label === "traffic light" && o.cor) return true;
+  const perto = o.proximity === Proximity.PERTO;
+  const medio = o.proximity === Proximity.MEDIO;
+  const vindo = o.approaching === true;
+  if (perto) return true;
+  if (VEHICLES.has(label) && vindo && medio) return true;
+  return medio && (o.inPath || vindo);
+}
+
+/** A frase sem o "Atenção,"/"Cuidado,": o que ela informa de fato. */
+const nucleoDaFrase = (t) => String(t).replace(/^(Atenção|Cuidado), /, "").toLowerCase();
+
 /** Mesmas regras do AlertEngine Android. */
 export class AlertEngine {
   // Intervalos apertados de propósito: quem varre o ambiente com o celular
   // precisa de retorno quase imediato. Valores folgados faziam o app parecer
   // mudo enquanto a tela já mostrava os objetos.
-  constructor({ requiredStreak = 2, repeatCooldownMs = 3000, minIntervalMs = 900 } = {}) {
-    Object.assign(this, { requiredStreak, repeatCooldownMs, minIntervalMs });
+  constructor({ requiredStreak = 2, repeatCooldownMs = 3000, minIntervalMs = 900, repeatParadoMs = 12000 } = {}) {
+    // repeatParadoMs: o mesmo objeto, parado, à mesma distância. Repetir a
+    // cada 3 s "Atenção, mesa à frente" com nada mudando é alarme que
+    // ensina a ignorar alarme. Aproximou ou mudou de faixa: fala na hora.
+    Object.assign(this, { requiredStreak, repeatCooldownMs, minIntervalMs, repeatParadoMs });
     this.streaks = new Map();
     this.lastSpoken = new Map();
+    this.ultimoPorObjeto = new Map();   // streakKey -> { ts, dist }
     this.lastAnyMs = null;
   }
 
@@ -148,6 +173,13 @@ export class AlertEngine {
       if ((this.streaks.get(c.streakKey) ?? 0) < this.requiredStreak) continue;
       const last = this.lastSpoken.get(c.key);
       if (last !== undefined && nowMs - last < this.repeatCooldownMs) continue;
+      // Mesmo objeto, mesma distância, dito há pouco: subir de "Pessoa à
+      // frente, a dois metros e meio" para "Atenção, pessoa à frente, a dois
+      // metros e meio" no mesmo segundo repete a frase sem informação nova.
+      const ult = this.ultimoPorObjeto.get(c.streakKey);
+      if (ult && ult.nucleo === nucleoDaFrase(c.text)
+          && nowMs - ult.ts < (c.vindo ? this.repeatCooldownMs
+            : c.priority === Priority.ALTA ? this.repeatParadoMs / 2 : this.repeatParadoMs)) continue;
       if (!best || c.priority < best.priority) best = c;
     }
     if (!best) return null;
@@ -155,11 +187,12 @@ export class AlertEngine {
         && nowMs - this.lastAnyMs < this.minIntervalMs) return null;
 
     this.lastSpoken.set(best.key, nowMs);
+    this.ultimoPorObjeto.set(best.streakKey, { ts: nowMs, nucleo: nucleoDaFrase(best.text) });
     this.lastAnyMs = nowMs;
     return best;
   }
 
-  reset() { this.streaks.clear(); this.lastSpoken.clear(); this.lastAnyMs = null; }
+  reset() { this.streaks.clear(); this.lastSpoken.clear(); this.ultimoPorObjeto.clear(); this.lastAnyMs = null; }
 
   #candidate(o) {
     const label = o.detection.label;
@@ -194,6 +227,8 @@ export class AlertEngine {
         key: `${label}|${o.direction}|${o.proximity}|${o.comPessoa ? "p" : ""}`,
         comPessoa: o.comPessoa === true,
         direcao: o.direction,
+        dist: d,
+        vindo: o.approaching === true,
       };
     }
 
@@ -211,7 +246,7 @@ export class AlertEngine {
     const prefixo = priority === Priority.ALTA ? (vindo && vehicle ? "Cuidado, " : "Atenção, ") : "";
     const text = prefixo ? prefixo + frase : cap(frase);
     return {
-      text, priority,
+      text, priority, dist, vindo,
       streakKey: `${label}|${o.direction}`,                                  // estavel entre quadros
       key: `${label}|${o.direction}|${o.proximity}|${o.cor ?? ""}`,          // governa o repetir
     };

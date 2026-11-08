@@ -1,0 +1,279 @@
+<title>Íris Simulador de Voz</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Atkinson+Hyperlegible+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: uma coluna de bolso — escolher cena, ouvir, ler a transcrição com o metro de cada fala. */
+  :root {
+    --fundo: #07111F;
+    --painel: #0D1B2E;
+    --painel-2: #12243B;
+    --linha: #1F3655;
+    --texto: #EAF4FF;
+    --suave: #9BB4CF;
+    --ciano: #7FE9FF;
+    --ciano-forte: #19C6F0;
+    --agora: #FFB547;
+    --alerta: #FF6B6B;
+    --ambiente: #9BE39B;
+    --f-corpo: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --f-dado: "Atkinson Hyperlegible Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--fundo); color: var(--texto);
+    font: 17px/1.5 var(--f-corpo);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 18px 120px;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; display: grid; gap: 20px; }
+  header { display: grid; gap: 6px; }
+  .marca { font: 600 .78rem/1 var(--f-dado); letter-spacing: .16em; text-transform: uppercase; color: var(--ciano); }
+  h1 { margin: 0; font-size: 1.7rem; line-height: 1.15; text-wrap: balance; }
+  .intro { margin: 0; color: var(--suave); max-width: 60ch; }
+
+  #grupos { display: grid; gap: 18px; }
+  .grupo { display: grid; gap: 8px; }
+  .grupo h2 { margin: 0; font: 600 .8rem/1 var(--f-dado); letter-spacing: .14em; text-transform: uppercase; color: var(--suave); }
+  .cenas { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .cena {
+    font: inherit; color: var(--texto); text-align: left; cursor: pointer;
+    background: var(--painel); border: 1px solid var(--linha); border-radius: 14px;
+    padding: 12px 14px; min-height: 64px; display: grid; gap: 2px;
+  }
+  .cena b { font-size: 1rem; }
+  .cena span { font-size: .85rem; color: var(--suave); }
+  .cena[aria-pressed="true"] { border-color: var(--ciano-forte); background: var(--painel-2); box-shadow: inset 0 0 0 1px var(--ciano-forte); }
+  .cena:focus-visible, button:focus-visible, select:focus-visible { outline: 3px solid var(--ciano); outline-offset: 2px; }
+
+  .detalhe { background: var(--painel); border: 1px solid var(--linha); border-radius: 18px; padding: 16px; display: grid; gap: 12px; }
+  .detalhe h3 { margin: 0; font-size: 1.25rem; text-wrap: balance; }
+  .detalhe p { margin: 0; color: var(--suave); }
+  .numeros { display: flex; flex-wrap: wrap; gap: 6px 16px; font: .85rem/1.3 var(--f-dado); color: var(--suave); font-variant-numeric: tabular-nums; }
+  .numeros b { color: var(--texto); font-weight: 600; }
+
+  ol.falas { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .fala { display: grid; grid-template-columns: 4.6rem 1fr; gap: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid transparent; }
+  .fala.atual { background: var(--painel-2); border-color: var(--ciano-forte); }
+  .quando { font: .8rem/1.35 var(--f-dado); color: var(--suave); font-variant-numeric: tabular-nums; display: grid; align-content: start; }
+  .quando b { color: var(--texto); font-weight: 600; font-size: .9rem; }
+  .corpo { min-width: 0; display: grid; gap: 4px; }
+  .tipo { justify-self: start; font: 600 .7rem/1 var(--f-dado); letter-spacing: .1em; text-transform: uppercase; padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; }
+  .tipo.aviso { color: var(--ciano); }
+  .tipo.agora { color: var(--agora); }
+  .tipo.alerta { color: var(--alerta); }
+  .tipo.ambiente { color: var(--ambiente); }
+  .texto { font-size: 1.02rem; }
+  .nota { font-size: .82rem; color: var(--suave); font-style: italic; }
+  .pausa { font: .78rem/1 var(--f-dado); color: var(--suave); padding: 2px 12px 2px 5.6rem; }
+
+  .player {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    background: color-mix(in srgb, var(--fundo) 92%, transparent);
+    backdrop-filter: blur(8px); border-top: 1px solid var(--linha);
+    padding: 10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  }
+  .player .in { max-width: 680px; margin: 0 auto; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+  .botoes { display: flex; gap: 8px; }
+  .player button {
+    font: 700 1.05rem var(--f-corpo); border: 0; border-radius: 14px; min-height: 56px; padding: 0 18px; cursor: pointer;
+  }
+  #ouvir { background: var(--ciano-forte); color: #03121F; flex: 1; }
+  #parar { background: var(--painel-2); color: var(--texto); border: 1px solid var(--linha); }
+  .ritmo { display: grid; gap: 2px; font-size: .75rem; color: var(--suave); }
+  .ritmo select { font: inherit; font-size: .9rem; color: var(--texto); background: var(--painel); border: 1px solid var(--linha); border-radius: 10px; padding: 8px; }
+  .aviso-voz { margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--painel-2); color: var(--agora); font-size: .9rem; }
+  footer { color: var(--suave); font-size: .85rem; display: grid; gap: 6px; }
+  footer code { font-family: var(--f-dado); font-size: .8rem; color: var(--texto); }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="marca">Projeto Íris · 0.10</span>
+    <h1>Ouça o que o Íris diria</h1>
+    <p class="intro">Cada cena roda o mesmo código do aplicativo com uma rua, um GPS e uma câmera de mentira. Toque numa cena e em Ouvir. Nada aqui usa sua câmera nem sua localização.</p>
+  </header>
+
+  <div id="grupos"></div>
+
+  <section class="detalhe" aria-labelledby="tituloCena">
+    <h3 id="tituloCena"></h3>
+    <p id="resumoCena"></p>
+    <div class="numeros" id="numeros"></div>
+    <p class="aviso-voz" id="semVoz" hidden>Este navegador não tem voz sintetizada. A transcrição abaixo continua valendo.</p>
+    <ol class="falas" id="falas"></ol>
+  </section>
+
+  <footer>
+    <span>Metro e segundo de cada fala vêm da simulação: a pessoa anda a 1,2 m/s, com o erro de GPS de uma rua do centro.</span>
+    <span>Código: <code>navegacao.js</code>, <code>fala.js</code>, <code>core.js</code> e <code>localizar.js</code>, sem alteração.</span>
+  </footer>
+</div>
+
+<div class="player" role="region" aria-label="Reprodução">
+  <div class="in">
+    <div class="botoes">
+      <button id="ouvir" type="button">Ouvir</button>
+      <button id="parar" type="button">Parar</button>
+    </div>
+    <label class="ritmo" for="ritmo">Pausas
+      <select id="ritmo">
+        <option value="curta">Curtas</option>
+        <option value="real4">Reais ÷ 4</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<script>/*MOTOR*/</script>
+<script>
+(() => {
+  const CENAS = window.IRIS_SIM || [];
+  const $ = (id) => document.getElementById(id);
+  const sintese = window.speechSynthesis;
+  let atual = CENAS.find((c) => c.id === "onde-estou") || CENAS[0];
+  let execucao = 0;
+
+  // ---- escolha de cena ----
+  const ordemGrupos = ["Situar", "Andar", "Câmera"];
+  const rotuloGrupo = { Situar: "Onde estou", Andar: "Navegação a pé", "Câmera": "Câmera ligada" };
+  const grupos = $("grupos");
+  for (const g of ordemGrupos) {
+    const lista = CENAS.filter((c) => c.grupo === g);
+    if (!lista.length) continue;
+    const sec = document.createElement("section");
+    sec.className = "grupo";
+    sec.innerHTML = `<h2>${rotuloGrupo[g]}</h2><div class="cenas"></div>`;
+    const caixa = sec.querySelector(".cenas");
+    for (const c of lista) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "cena"; b.id = `cena-${c.id}`;
+      b.innerHTML = `<b></b><span></span>`;
+      b.querySelector("b").textContent = c.titulo;
+      b.querySelector("span").textContent = `${c.linhas.length} falas`;
+      b.addEventListener("click", () => {
+        parar(); escolher(c);
+        document.querySelector(".detalhe").scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      });
+      caixa.appendChild(b);
+    }
+    grupos.appendChild(sec);
+  }
+
+  const fmtT = (s) => s < 60 ? `${Math.round(s)} s` : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+
+  function escolher(c) {
+    atual = c;
+    try { history.replaceState(null, "", `#${c.id}`); } catch {}
+    for (const b of document.querySelectorAll(".cena")) b.setAttribute("aria-pressed", String(b.id === `cena-${c.id}`));
+    $("tituloCena").textContent = c.titulo;
+    $("resumoCena").textContent = c.resumo;
+    const ultima = c.linhas[c.linhas.length - 1];
+    const metros = c.linhas.reduce((m, l) => Math.max(m, l.metros ?? 0), 0);
+    const chars = c.linhas.reduce((n, l) => n + l.texto.length, 0);
+    $("numeros").innerHTML = "";
+    const add = (rot, val) => { const s = document.createElement("span"); s.innerHTML = `${rot} <b></b>`; s.querySelector("b").textContent = val; $("numeros").appendChild(s); };
+    add("falas", String(c.linhas.length));
+    add("duração", fmtT(ultima ? ultima.t : 0));
+    if (metros) add("percurso", `${metros} m`);
+    add("voz", `~${Math.round(chars / 16)} s`);
+
+    const ol = $("falas");
+    ol.innerHTML = "";
+    c.linhas.forEach((l, i) => {
+      if (i > 0) {
+        const gap = l.t - c.linhas[i - 1].t;
+        if (gap >= 15) {
+          const p = document.createElement("li");
+          p.className = "pausa";
+          p.textContent = l.metros != null && c.linhas[i - 1].metros != null
+            ? `${fmtT(gap)} andando, ${l.metros - c.linhas[i - 1].metros} m em silêncio`
+            : `${fmtT(gap)} depois`;
+          ol.appendChild(p);
+        }
+      }
+      const li = document.createElement("li");
+      li.className = "fala"; li.id = `fala-${i}`;
+      const quando = l.metros != null ? `<b>${l.metros} m</b>${fmtT(l.t)}` : `<b>${fmtT(l.t)}</b>`;
+      li.innerHTML = `<div class="quando">${quando}</div><div class="corpo"><span class="tipo ${l.tipo}"></span><span class="texto"></span></div>`;
+      li.querySelector(".tipo").textContent = { aviso: "aviso", agora: "agora", alerta: "alerta", ambiente: "ambiente" }[l.tipo] || l.tipo;
+      li.querySelector(".texto").textContent = l.texto;
+      if (l.nota) { const n = document.createElement("span"); n.className = "nota"; n.textContent = l.nota; li.querySelector(".corpo").appendChild(n); }
+      li.addEventListener("click", () => { parar(); falar(l.texto); marcar(i); });
+      ol.appendChild(li);
+    });
+  }
+
+  // ---- voz ----
+  let voz = null;
+  function escolherVoz() {
+    if (!sintese) return;
+    const vs = sintese.getVoices();
+    voz = vs.find((v) => /pt[-_]BR/i.test(v.lang) && /google|luciana|natural/i.test(v.name))
+      || vs.find((v) => /pt[-_]BR/i.test(v.lang)) || vs.find((v) => /^pt/i.test(v.lang)) || null;
+  }
+  if (sintese) { escolherVoz(); sintese.addEventListener?.("voiceschanged", escolherVoz); }
+  else $("semVoz").hidden = false;
+
+  function falar(texto) {
+    return new Promise((ok) => {
+      if (!sintese) { setTimeout(ok, 350 + texto.length * 60); return; }
+      const u = new SpeechSynthesisUtterance(texto);
+      u.lang = "pt-BR"; if (voz) u.voice = voz; u.rate = 1.05;
+      let feito = false;
+      const fim = () => { if (!feito) { feito = true; ok(); } };
+      u.onend = fim; u.onerror = fim;
+      // Rede de segurança: algumas vozes não disparam onend.
+      setTimeout(fim, 2500 + texto.length * 110);
+      sintese.speak(u);
+    });
+  }
+
+  function marcar(i) {
+    for (const el of document.querySelectorAll(".fala.atual")) el.classList.remove("atual");
+    const el = $(`fala-${i}`);
+    if (!el) return;
+    el.classList.add("atual");
+    const r = el.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > innerHeight - 110) el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  }
+
+  const espera = (ms) => new Promise((r) => setTimeout(r, ms));
+  function pausa(gapS) {
+    if ($("ritmo").value === "real4") return Math.min(20000, gapS * 250);
+    return Math.min(2200, 500 + gapS * 30);
+  }
+
+  async function tocar() {
+    const minha = ++execucao;
+    sintese?.cancel();
+    $("ouvir").textContent = "Tocando…";
+    const ls = atual.linhas;
+    for (let i = 0; i < ls.length; i++) {
+      if (minha !== execucao) return;
+      if (i > 0) await espera(pausa(ls[i].t - ls[i - 1].t));
+      if (minha !== execucao) return;
+      marcar(i);
+      await falar(ls[i].texto);
+    }
+    if (minha === execucao) $("ouvir").textContent = "Ouvir de novo";
+  }
+
+  function parar() {
+    execucao++;
+    sintese?.cancel();
+    $("ouvir").textContent = "Ouvir";
+  }
+
+  $("ouvir").addEventListener("click", tocar);
+  $("parar").addEventListener("click", parar);
+
+  const doHash = CENAS.find((c) => `#${c.id}` === location.hash);
+  escolher(doHash || atual);
+  addEventListener("hashchange", () => { const c = CENAS.find((x) => `#${x.id}` === location.hash); if (c && c !== atual) { parar(); escolher(c); } });
+})();
+</script>

@@ -25,7 +25,9 @@ test("alerta exige dois quadros e respeita intervalo", () => {
   assert.equal(a.text, "Atenção, pessoa à frente, perto.");
   assert.equal(a.priority, Priority.ALTA);
   assert.equal(e.process([obj("person")], 1000), null);
-  assert.ok(e.process([obj("person")], 5200));
+  // Mesma pessoa, parada, à mesma distância: repete, mas sem martelar.
+  assert.equal(e.process([obj("person")], 5200), null);
+  assert.ok(e.process([obj("person")], 6200));
 });
 
 test("alta vence média e classes fora da lista são ignoradas", () => {
@@ -371,4 +373,32 @@ test("vários objetos na cena: todos ganham voz, não só o primeiro", () => {
   for (const esperado of ["copo", "celular", "garrafa"]) {
     assert.ok(juntos.includes(esperado), `"${esperado}" nunca foi falado: ${ditos.join(" | ")}`);
   }
+});
+
+// ---------------- Sem repetição (0.10) ----------------
+
+test("alerta: subir para 'Atenção' com a mesma frase não repete a frase", () => {
+  const e = new AlertEngine();
+  const medio = obj("person", Direction.FRENTE, Proximity.PERTO, false, { distanceM: 2.4 });
+  const alta = obj("person", Direction.FRENTE, Proximity.PERTO, true, { distanceM: 2.4 });
+  e.process([medio], 0);
+  assert.match(e.process([medio], 100).text, /^Pessoa/);
+  assert.equal(e.process([alta], 1200), null, "mesma pessoa, mesma distância: nada novo a dizer");
+});
+
+test("alerta: objeto parado não vira alarme a cada 3 segundos", () => {
+  const e = new AlertEngine();
+  const mesa = [obj("chair", Direction.FRENTE, Proximity.PERTO, false, { distanceM: 1.5 })];
+  const falas = [];
+  for (let t = 0; t <= 20000; t += 100) { const a = e.process(mesa, t); if (a) falas.push(t); }
+  assert.ok(falas.length <= 2, `repetiu ${falas.length} vezes em 20 s`);
+});
+
+test("alerta: semáforo que muda de cor fala na hora", () => {
+  const e = new AlertEngine();
+  const sem = (cor) => [obj("traffic light", Direction.FRENTE, Proximity.MEDIO, false, { distanceM: 7, cor })];
+  e.process(sem("vermelho"), 0);
+  assert.match(e.process(sem("vermelho"), 100).text, /vermelho/);
+  const v = e.process(sem("verde"), 1200) ?? e.process(sem("verde"), 1300);
+  assert.match(v?.text ?? "", /verde/);
 });

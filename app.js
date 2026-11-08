@@ -106,7 +106,19 @@ const rastreador = new RastreadorDePosicao({
   aoMover: (p) => aoMoverPosicao(p),
   aoFalhar: (e) => { dizer(e.message, Canal.SISTEMA, { chave: "nav:gps-erro" }); },
 });
-const bussola = new Bussola();
+// Alinhamento antes de sair: parado, o GPS quase não manda leitura nova, e é
+// a bússola girando que precisa acordar o navegador ("isso, siga em frente").
+let ultimoGiroMs = 0;
+const bussola = new Bussola({
+  aoGirar: () => {
+    const agora = performance.now();
+    if (agora - ultimoGiroMs < 250) return;
+    ultimoGiroMs = agora;
+    if (navegador.ativo && navegador.alinhamento !== "feito" && rastreador.ultima) {
+      aoMoverPosicao({ ...rastreador.ultima, velocidadeMs: 0 });
+    }
+  },
+});
 let rotaAtual = null;
 let destinoAtual = "";
 let recalculando = false;
@@ -124,6 +136,7 @@ const memoriaLugares = new MemoriaDeLugares({
 });
 const embedder = new Embedder();
 let localizando = false;
+let ultimoOndeEstou = null;   // para a segunda pergunta dizer só o que mudou
 let memorizando = false;
 // Quando o "Onde estou?" dispara a descrição, a frase do lugar abre a fala da
 // câmera — numa fala só, para a segunda não engolir a primeira na fila.
@@ -1066,7 +1079,16 @@ function aoMoverPosicao(p) {
   const eventos = navegador.atualizar(p, bussola.disponivel ? bussola.graus : null, performance.now());
 
   for (const ev of eventos) {
-    if (ev.recalcular) { recalcularRota(); continue; }
+    if (ev.recalcular) {
+      // A frase de "saiu do caminho" diz para que lado a rota fica: ela
+      // precisa sair antes do recálculo, senão a pessoa fica sem orientação.
+      if (ev.texto) {
+        dizer(ev.texto, Canal.NAVEGACAO, { chave: ev.chave, urgente: ev.urgente, validadeMs: 6000 });
+        diario.alerta({ text: ev.texto, tipo: "nav-fora", priority: Priority.MEDIA });
+      }
+      recalcularRota();
+      continue;
+    }
 
     let texto = ev.texto;
     // A câmera dá o que o mapa não tem: um ponto que se confirma com a bengala.
@@ -1100,7 +1122,7 @@ async function recalcularRota() {
       chaveGoogle: prefs.chaveGoogle, origem,
       destino: rotaAtual.destino, posicaoAtual: origem,   // já é ponto: não busca de novo
     });
-    const inicio = navegador.iniciar(rotaAtual);
+    const inicio = navegador.iniciar(rotaAtual, { recalculo: true });
     dizer(inicio.texto, Canal.NAVEGACAO, { chave: `recalc:${Date.now()}`, validadeMs: 20000 });
   } catch (e) {
     diario.falha("recalculo", e);
@@ -1239,7 +1261,10 @@ async function ondeEstou() {
 
     let texto;
     if (pos) {
-      const r = await consultarOndeEstou(pos, { rumoPessoa, familiar: familiar?.nome ?? null });
+      const r = await consultarOndeEstou(pos, {
+        rumoPessoa, familiar: familiar?.nome ?? null, anterior: ultimoOndeEstou,
+      });
+      ultimoOndeEstou = r.estado;
       texto = r.texto;
       barramento.publicar(Evento.LOCALIZACAO, {
         endereco: r.endereco, referencias: r.referencias.map((x) => x.tipo),
