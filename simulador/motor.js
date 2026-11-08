@@ -10,8 +10,17 @@ import { Navegador, distanciaM, rumo } from "../navegacao.js";
 import { Canal, FilaDeFala, NarracaoDeAmbiente } from "../fala.js";
 import {
   analyzeSpatial, MotionTracker, AlertEngine, Narrador, Verbosidade,
-  associarCortantes, Priority, ALTURA_REAL_M, FOV_VERTICAL_RAD,
+  associarCortantes, Priority, ALTURA_REAL_M, FOV_VERTICAL_RAD, registrarClasses,
 } from "../core.js";
+import { AvaliadorDeAmeacas, Nivel, ROTULO_ARMA } from "../ameacas.js";
+
+// Os rótulos do vocabulário aberto que as cenas usam (o app registra todos
+// a partir de aberto.js, que precisa de navegador).
+registrarClasses({
+  nomes: { "aberto:degrau": { singular: "degrau", plural: "degraus", feminino: false } },
+  alturas: { "aberto:degrau": 0.18, [ROTULO_ARMA]: 0.2 },
+  alerta: ["aberto:degrau"],
+});
 import {
   enderecoFalado, selecionarReferencias, fraseOndeEstou, fraseOndeEstouDeNovo,
 } from "../localizar.js";
@@ -125,9 +134,10 @@ function caixaA(label, metros, cx = 0.5, larguraRel = 0.45) {
 }
 const det = (label, metros, cx, lr) => ({ label, score: 0.9, box: caixaA(label, metros, cx, lr) });
 
-function simularCena({ duracaoS, quadro, semente = 3 }) {
+function simularCena({ duracaoS, quadro, semente = 3, velocidadeMs = 0 }) {
   const rnd = aleatorio(semente);
   const motion = new MotionTracker(), alerts = new AlertEngine();
+  const avaliador = new AvaliadorDeAmeacas();
   const ambiente = new NarracaoDeAmbiente(new Narrador());
   const fila = new FilaDeFala();
   const linhas = [];
@@ -144,8 +154,16 @@ function simularCena({ duracaoS, quadro, semente = 3 }) {
     let objs = associarCortantes(motion.update(analyzeSpatial(dets), ts));
     for (const o of objs) { const orig = dets.find((d) => d.label === o.detection.label); if (orig?.cor) o.cor = orig.cor; }
     const mudanca = ambiente.observar(objs, ts);
-    const a = alerts.process(objs, ts);
-    if (a) {
+    const ameaca = avaliador.avaliar(objs, { velocidadeMs }, ts).find((x) => x.texto);
+    for (const c of avaliador.classesAtivas) alerts.silenciar(c, ts + 1500);
+    if (ameaca) {
+      fila.calarAbaixoDe(Canal.ALERTA);
+      fila.oferecer({ texto: ameaca.texto, canal: Canal.ALERTA, chave: ameaca.chave, urgente: true, ameaca: true }, ts);
+      if (ameaca.classe) alerts.silenciar(ameaca.classe, ts + 5000);
+      if (ameaca.oferecerSocorro) fila.oferecer({ texto: "Se precisar de ajuda, segure o botão de socorro.", canal: Canal.SISTEMA, chave: "sos" }, ts);
+    }
+    const a = ameaca ? null : alerts.process(objs, ts);
+    if (ameaca) { /* a ameaça já ocupou a voz */ } else if (a) {
       fila.calarAbaixoDe(Canal.ALERTA);
       fila.oferecer({ texto: a.text, canal: Canal.ALERTA, chave: a.key, urgente: a.priority === Priority.ALTA }, ts);
     } else {
@@ -157,7 +175,8 @@ function simularCena({ duracaoS, quadro, semente = 3 }) {
     const s = fila.proxima(ts, ts < falandoAte);
     if (s) {
       falandoAte = ts + duracaoDaFala(s.texto);
-      linhas.push({ t, texto: s.texto, tipo: s.canal === Canal.ALERTA ? "alerta" : "ambiente" });
+      linhas.push({ t, texto: s.texto,
+        tipo: s.item.ameaca ? "ameaca" : s.canal === Canal.ALERTA ? "alerta" : s.canal === Canal.SISTEMA ? "aviso" : "ambiente" });
     }
   }
   return linhas;
@@ -221,6 +240,31 @@ export const CENARIOS = [
     resumo: "Quatro objetos parados. Uma frase só, e depois silêncio enquanto nada muda.",
     gerar: () => simularCena({ duracaoS: 12, quadro: () => [
       det("cup", 0.9, 0.35), det("cell phone", 0.8, 0.55), det("bottle", 1.1, 0.72), det("book", 1.0, 0.2)] }) },
+  { id: "moto", grupo: "Ameaças", titulo: "Moto vindo rápido",
+    resumo: "Uma moto cruza pela direita a uns 25 km/h. O app calcula o tempo até o impacto e manda parar.",
+    gerar: () => simularCena({ duracaoS: 6, quadro: (t) => [det("motorcycle", Math.max(2, 22 - t * 7), 0.82, 1.1)] }) },
+  { id: "correndo", grupo: "Ameaças", titulo: "Alguém correndo na sua direção",
+    resumo: "Uma pessoa vem correndo de frente. O app descreve o que acontece, sem acusar ninguém.",
+    gerar: () => simularCena({ duracaoS: 5, quadro: (t) => [det("person", Math.max(1.2, 12 - t * 3.8), 0.5)] }) },
+  { id: "colado", grupo: "Ameaças", titulo: "Pessoa muito perto, parada",
+    resumo: "Alguém fica a um metro por muitos segundos. Um aviso só, e a dica do botão de socorro.",
+    gerar: () => simularCena({ duracaoS: 16, quadro: () => [det("person", 1.0, 0.55)] }) },
+  { id: "degrau", grupo: "Ameaças", titulo: "Degrau no caminho",
+    resumo: "Andando em direção a um degrau. Primeiro atenção, depois pare.",
+    gerar: () => simularCena({ duracaoS: 4, velocidadeMs: 1.2,
+      quadro: (t) => [det("aberto:degrau", Math.max(0.8, 4 - t * 1.2), 0.5, 4)] }) },
+  { id: "arma", grupo: "Ameaças", titulo: "Possível arma de fogo",
+    resumo: "Primeira varredura vê algo parecido com arma: o app cala e olha de novo. Só fala depois de confirmar, e sempre como possível.",
+    gerar: () => simularCena({ duracaoS: 9, quadro: (t) => {
+      const p = det("person", 4, 0.5);
+      const pb = p.box;
+      const mao = { left: pb.left + (pb.right - pb.left) * 0.6, right: pb.left + (pb.right - pb.left) * 0.85,
+        top: pb.top + (pb.bottom - pb.top) * 0.45, bottom: pb.top + (pb.bottom - pb.top) * 0.58 };
+      const l = [p];
+      // 1ª varredura em t=1 s; segunda olhada (pedida pelo app) em t=3,5 s
+      if (t >= 1) l.push({ label: ROTULO_ARMA, score: 0.3, box: mao, varredura: t >= 3.5 ? 2 : 1 });
+      return l;
+    } }) },
   { id: "esquina-camera", grupo: "Câmera", titulo: "Semáforo e ônibus",
     resumo: "Semáforo muda de vermelho para verde e um ônibus cruza.",
     gerar: () => simularCena({ duracaoS: 12, quadro: (t) => {

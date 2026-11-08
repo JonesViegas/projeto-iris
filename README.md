@@ -32,10 +32,14 @@ próprio aparelho**: nenhuma imagem da câmera sai dele.
 
 ### O que ainda **não** faz
 
-**Arma de fogo não é detectada.** O COCO não tem classe de arma — há um teste que
-trava isso no contrato. O app reconhece faca, tesoura e taco, e os anuncia como
-"objeto pontiagudo", nunca como arma. Um falso positivo aqui causa pânico e pode
-acusar alguém injustamente.
+**Arma de fogo: só "possível", só confirmada, e só com o reconhecimento ampliado ligado.**
+O COCO não tem classe de arma. Com Ajustes → "Reconhecimento ampliado", cada varredura inclui
+uma consulta de arma ao OWL-ViT; uma detecção isolada **não é falada** — o app pede na hora uma
+segunda olhada e só fala se as duas concordarem: *"Atenção. Possível arma de fogo com uma pessoa
+à frente, a quatro metros. Se puder, afaste-se com calma, sem correr."* O OWL-ViT confunde arma
+com celular e furadeira, e varre a cada 9 s, não a cada quadro. O caminho certo é o detector
+treinado: a classe `arma_de_fogo` já está em [`treino/classes.yaml`](treino/classes.yaml), com a
+precisão mínima mais alta da lista (0,95). Faca, tesoura e taco seguem como "objeto pontiagudo".
 
 **Buraco só é detectado com o reconhecimento ampliado ligado**, e com ressalva. O COCO
 e o ADE20K não têm a classe. O vocabulário aberto (Ajustes → "Reconhecimento ampliado")
@@ -105,10 +109,44 @@ Arquitetura, decisões e próximas etapas de ML: [`docs/ROTEIRO-ML.md`](docs/ROT
   dois metros e meio" no mesmo segundo virou uma frase só; objeto parado à mesma distância não
   repete a cada 3 s; e a narração não anuncia o que o alerta vai anunciar logo depois.
 
+## Ameaças e socorro (0.11)
+
+`ameacas.js` responde uma pergunta diferente da do alerta comum: não "o que está perto", mas
+"o que pode me machucar nos próximos segundos". Olha trajetória e tempo até o impacto.
+
+| Ameaça | Como decide | O que a pessoa ouve |
+|---|---|---|
+| Colisão com veículo | velocidade própria do veículo (descontada a de quem anda) e tempo até o impacto ≤ 5 s | *"Cuidado, moto vindo pela direita, rápido."* → *"Pare. Moto pela direita."* |
+| Queda | buraco, bueiro, vala, degrau, escada no caminho a ≤ 4 m | *"Atenção, degrau à frente, a três metros. Vá devagar e confirme com a bengala."* → *"Pare. Degrau logo à frente."* |
+| Na altura da cabeça | galho baixo no caminho (a bengala não alcança) | *"Atenção, galho baixo na altura da cabeça…"* |
+| Pessoa vindo depressa | aproximação acima de ~7 km/h, medida numa janela de 1,2 s | *"Atenção, alguém vindo depressa de frente, a seis metros."* |
+| Pessoa colada | alguém a ≤ 2 m por 8 s ou mais | *"Há uma pessoa muito perto de você, à frente, há alguns segundos."* |
+| Acompanhando | alguém a ≤ 4 m por mais de 1 min enquanto a pessoa anda | *"Uma pessoa está andando junto com você, à esquerda…"* |
+| Possível arma de fogo | duas observações independentes em 25 s | ver acima |
+
+**Regras de linguagem, que valem mais que os limiares:** descreve comportamento, nunca intenção
+(nada de "suspeito", "assalto"); nada de rosto, roupa, cor de pele ou idade; arma é sempre
+"possível"; a frase diz o que fazer quando há o que fazer; e a mesma ameaça não se repete — só
+volta se subir de nível, ou se chegar mais perto depois de 2,5 s, ou depois de 15 s.
+
+**Velocidade sem GPS:** o app liga o GPS junto com a câmera para saber se a pessoa anda. Sem
+leitura recente, ele desconta uma caminhada de tudo que vem de frente — senão duas pessoas
+andando uma para a outra virariam "alguém vindo depressa".
+
+**Limitação física:** a câmera olha para a frente. "Acompanhando" vê quem anda junto, à frente
+ou ao lado; quem vem atrás, não.
+
+**Botão SOS** (vermelho, ao lado de "Onde estou?"): segurar 1,2 s. Abre a mensagem pronta para
+o contato de confiança, com link de mapa e hora — a pessoa confirma o envio, porque um navegador
+não manda SMS sozinho, e porque um toque no bolso não deve alarmar ninguém. Em Ajustes dá para
+trocar por "ligar para o 190". Com TalkBack ou VoiceOver, o duplo toque já aciona. Depois de uma
+ameaça séria o app lembra, no máximo a cada 5 min: *"Se precisar de ajuda, segure o botão de
+socorro."*
+
 ### Simulador de voz no celular
 
-`simulador/` toca no navegador, com a voz do aparelho, o que o app diria em nove cenas (onde estou,
-rota, travessia, desvio, sem bússola, câmera). Roda o mesmo código do app, sem câmera nem GPS.
+`simulador/` toca no navegador, com a voz do aparelho, o que o app diria em catorze cenas (onde
+estou, rota, travessia, desvio, sem bússola, ameaças e câmera). Roda o mesmo código do app, sem câmera nem GPS.
 
 ```bash
 bash simulador/montar.sh      # gera simulador/simulador.html, arquivo único
@@ -261,6 +299,7 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `localizar.js` | **Lógica pura** do "Onde estou?": endereço, referências, direção relativa |
 | `lugares.js` | **Lógica pura** dos lugares familiares: aprender, reconhecer, esquecer |
 | `embedder.js` | Vetor de características do quadro (MediaPipe ImageEmbedder) |
+| `ameacas.js` | **Lógica pura**: colisão, queda, pessoa, possível arma; mensagem de socorro |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
@@ -276,7 +315,7 @@ navegador, e testada. `app.js` e os demais só fazem a ponte com a câmera, o GP
 ## Rodar local
 
 ```bash
-node --test test/*.test.mjs      # 100 testes: lógica, fala, navegação, layout e carga
+node --test test/*.test.mjs      # 114 testes: lógica, fala, navegação, layout e carga
 node test/simular.mjs             # o que seria falado, cena a cena
 node test/simular.mjs --comparar  # política atual contra a da 0.7, lado a lado
 node test/simular-rota.mjs        # o que seria falado ao longo de uma rota a pé
@@ -326,7 +365,7 @@ Atualizar:
 ```bash
 tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
     vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
-    localizar.js lugares.js embedder.js \
+    localizar.js lugares.js embedder.js ameacas.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```

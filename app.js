@@ -17,6 +17,7 @@ import { tracarRota } from "./rotas.js";
 import { RastreadorDePosicao, Bussola, ditarDestino } from "./posicao.js";
 import {
   DetectorAberto, nomesDoVocabulario, rotulosDeRisco, ALTURAS_ABERTAS, VOCABULARIO,
+  consultasDeAmeaca,
 } from "./aberto.js";
 import { DescritorNaNuvem, contextoLocal, AVISO_DE_CONSENTIMENTO } from "./nuvem.js";
 import {
@@ -25,6 +26,7 @@ import {
 import { ondeEstou as consultarOndeEstou } from "./localizar.js";
 import { MemoriaDeLugares, ArmazemIndexedDB } from "./lugares.js";
 import { Embedder } from "./embedder.js";
+import { AvaliadorDeAmeacas, Nivel, mensagemDeSocorro, linkSms } from "./ameacas.js";
 
 // As classes de vocabulário aberto passam a existir para todo o núcleo:
 // ganham nome flexionado, altura para a estimativa de distância e, as de
@@ -142,6 +144,15 @@ let memorizando = false;
 // câmera — numa fala só, para a segunda não engolir a primeira na fila.
 let prefixoDescricao = null;
 
+// Ameaças e socorro
+const avaliador = new AvaliadorDeAmeacas();
+let idVarredura = 0;            // cada varredura aberta é uma observação independente
+let confirmandoAmeaca = false;
+let ultimaConfirmacaoMs = 0;
+let ultimaAmeaca = null;        // vai como motivo na mensagem de socorro
+let dicaSocorroMs = -Infinity;
+let gpsDaCamera = false;        // o GPS foi ligado pela câmera (não pela rota)
+
 // ---------------- Preferências ----------------
 const PREFS = "iris.prefs.v3";   // v3 acrescenta navegação, vocabulário e nuvem
 const prefs = Object.assign(
@@ -151,6 +162,7 @@ const prefs = Object.assign(
   {
     piso: false, validando: false, verbosidade: Verbosidade.NORMAL, modelo: "lite0",
     aberto: false, chaveGoogle: "", nuvemLigada: false, endpointNuvem: "/api/descrever",
+    contatoSocorro: "", socorroModo: "contato",
   },
   (() => { try { return JSON.parse(localStorage.getItem(PREFS) ?? "{}"); } catch { return {}; } })()
 );
@@ -486,6 +498,10 @@ async function start() {
   setState("ativo", "Percepção ativa");
   speak("Percepção iniciada.", true);
   rafId = requestAnimationFrame(tick);
+  // A velocidade de quem anda separa "alguém vindo depressa" de "duas pessoas
+  // andando uma para a outra". O GPS fica no aparelho; nada sai daqui.
+  if (!rastreador.ativo) gpsDaCamera = rastreador.iniciar();
+  avaliador.reset();
 
   if (prefs.piso) iniciarPiso();
 }
@@ -589,6 +605,8 @@ function stop(announce = true) {
   varreduraTimer = 0;
   riscosAbertos = [];
   fila.reset();
+  if (gpsDaCamera && !navegador.ativo) rastreador.parar();
+  gpsDaCamera = false;
   limparMarca();          // saída limpa: a próxima abertura não acusa queda
   setState("parado", "Parado. Toque em Iniciar para começar.");
   if (announce && wasActive) {
@@ -658,8 +676,14 @@ function processFrame(now) {
   // assim que o app sabe quando a cena voltou a ficar parada.
   const mudanca = ambiente.observar(objects, ts);
 
-  const alert = alerts.process(objects, ts);
-  if (alert) {
+  // Ameaças antes do alerta comum: elas olham trajetória e tempo até o
+  // impacto, e quando falam o alerta comum cala sobre o mesmo objeto.
+  const falouAmeaca = tratarAmeacas(objects, ts);
+
+  const alert = falouAmeaca ? null : alerts.process(objects, ts);
+  if (falouAmeaca) {
+    // nada: a ameaça já ocupou a voz neste quadro
+  } else if (alert) {
     const high = alert.priority === Priority.ALTA;
     // O bipe só acompanha uma fala que vai mesmo sair. Bipar sem falar deixa a
     // pessoa parada procurando um aviso que nunca veio.
@@ -826,7 +850,8 @@ async function varrerVocabularioAberto({ descricao = false } = {}) {
     const r = await detectorAberto.varrer(video);
     if (!r) return null;
 
-    riscosAbertos = r.deteccoes;
+    const id = ++idVarredura;
+    riscosAbertos = r.deteccoes.map((d) => ({ ...d, varredura: id }));
     riscosAteMs = performance.now() + VALIDADE_RISCO_MS;
     diario.alerta({ text: `[varredura ${r.ms} ms, ${r.deteccoes.length} riscos]`,
       tipo: "varredura", priority: Priority.BAIXA });
@@ -843,7 +868,8 @@ async function varrerVocabularioAberto({ descricao = false } = {}) {
 
     if (!descricao || r.deteccoes.length === 0) return null;
     const porNome = new Map();
-    for (const d of r.deteccoes) porNome.set(d.pt, (porNome.get(d.pt) ?? 0) + 1);
+    // Ameaça não entra na descrição: quem fala dela é o avaliador, com cautela.
+    for (const d of r.deteccoes) if (d.pt) porNome.set(d.pt, (porNome.get(d.pt) ?? 0) + 1);
     const itens = [...porNome.entries()].slice(0, 4)
       .map(([nome, n]) => (n === 1 ? nome : `${numero(n, false)} ${nome}`));
     return `No chão e em volta: ${itens.join(", ")}.`;
@@ -1224,6 +1250,125 @@ $("abrirAjustes").addEventListener("click", () => {
   dlgAjustes.showModal();
 });
 
+// ---------------- Ameaças ----------------
+
+function velocidadeAtual() {
+  const u = rastreador.ultima;
+  // Leitura velha não diz nada sobre agora: melhor "não sei" (o avaliador
+  // então é conservador) do que uma velocidade de dez segundos atrás.
+  return u && Date.now() - u.ts < 5000 ? u.velocidadeMs : undefined;
+}
+
+function tratarAmeacas(objects, ts) {
+  const lista = avaliador.avaliar(objects, { velocidadeMs: velocidadeAtual() }, ts);
+  for (const c of avaliador.classesAtivas) alerts.silenciar(c, ts + 1500);
+  let falou = false;
+  for (const a of lista) {
+    if (a.pedirConfirmacao) { confirmarAmeaca(); continue; }
+    const critica = a.nivel === Nivel.CRITICA;
+    if (!dizer(a.texto, Canal.ALERTA, { chave: a.chave, urgente: a.nivel <= Nivel.ALTA, interrompe: critica })) continue;
+    falou = true;
+    signal(true);
+    fila.calarAbaixoDe(Canal.ALERTA);
+    if (a.classe) alerts.silenciar(a.classe, ts + 5000);
+    ultimaAmeaca = { ...a, ts: performance.now() };
+    diario.alerta({ text: a.texto, tipo: `ameaca-${a.tipo}`, priority: Priority.ALTA });
+    barramento.publicar(Evento.ALERTA, { texto: a.texto, prioridade: Priority.ALTA, ameaca: a.tipo });
+    // A dica do socorro vem depois, no canal do sistema, e no máximo a cada
+    // cinco minutos: lembrar sempre seria só mais barulho no pior momento.
+    if (a.oferecerSocorro && ts - dicaSocorroMs > 300000) {
+      dicaSocorroMs = ts;
+      dizer("Se precisar de ajuda, segure o botão de socorro.", Canal.SISTEMA, { chave: "sos:dica" });
+    }
+  }
+  return falou;
+}
+
+/**
+ * Uma possível arma vista numa varredura só não é dita. Pedimos uma segunda
+ * olhada imediata, só com as frases de ameaça (rápida), para confirmar ou
+ * descartar. Duas observações independentes é o mínimo para falar.
+ */
+async function confirmarAmeaca() {
+  const agora = performance.now();
+  if (confirmandoAmeaca || agora - ultimaConfirmacaoMs < 4000) return;
+  if (!detectorAberto.pronto || state !== "ativo") return;
+  confirmandoAmeaca = true;
+  ultimaConfirmacaoMs = agora;
+  const estavaRodando = rafId !== 0;
+  if (estavaRodando) { cancelAnimationFrame(rafId); rafId = 0; }
+  try {
+    const r = await detectorAberto.varrer(video, { consultas: consultasDeAmeaca() });
+    if (r?.deteccoes?.length) {
+      const id = ++idVarredura;
+      const novas = r.deteccoes.map((d) => ({ ...d, varredura: id }));
+      riscosAbertos = [...riscosAbertos.filter((d) => d.grupo !== "ameaca"), ...novas,
+        ...riscosAbertos.filter((d) => d.grupo === "ameaca")];
+      riscosAteMs = performance.now() + VALIDADE_RISCO_MS;
+    }
+  } catch (e) {
+    diario.falha("confirmar-ameaca", e);
+  } finally {
+    confirmandoAmeaca = false;
+    if (estavaRodando && state === "ativo" && rafId === 0) rafId = requestAnimationFrame(tick);
+  }
+}
+
+// ---------------- Socorro ----------------
+// Segurar o botão por 1,2 s, para um toque sem querer não disparar. O app
+// abre a mensagem pronta (com o mapa) para o contato de confiança — o envio
+// final é da pessoa, porque um navegador não manda SMS sozinho, e isso é bom:
+// ninguém recebe um alarme falso por um toque no bolso.
+
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent ?? "");
+
+async function pedirSocorro() {
+  unlockAudio();
+  signal(true);
+  if (prefs.socorroModo === "190") {
+    speak("Ligando para a Polícia Militar, 190.", true);
+    setTimeout(() => { location.href = "tel:190"; }, 1500);
+    return;
+  }
+  speak("Pedindo socorro. Pegando a sua localização.", true);
+  const pos = await rastreador.umaVez(8000).catch(() => null);
+  const motivo = ultimaAmeaca && performance.now() - (ultimaAmeaca.ts ?? 0) < 600000
+    ? { colisao: "veículo", queda: "risco de queda", pessoa: "pessoa por perto", arma: "possível arma de fogo", cabeca: "obstáculo" }[ultimaAmeaca.tipo]
+    : null;
+  const texto = mensagemDeSocorro({
+    lat: pos?.lat, lng: pos?.lng, precisaoM: pos?.precisaoM,
+    endereco: ultimoOndeEstou?.endereco ?? null, motivo,
+  });
+  diario.alerta({ text: "[socorro]", tipo: "socorro", priority: Priority.ALTA });
+
+  if (prefs.contatoSocorro) {
+    speak("Abri a mensagem de socorro para o seu contato, com a sua localização. Toque em enviar para mandar.", true);
+    setTimeout(() => { location.href = linkSms(prefs.contatoSocorro, texto, { ios: IOS }); }, 2500);
+  } else if (navigator.share) {
+    speak("Você ainda não tem contato de socorro. Escolha para quem mandar a sua localização.", true);
+    try { await navigator.share({ title: "Socorro", text: texto }); } catch { /* cancelou */ }
+  } else {
+    speak("Cadastre um contato de socorro nos ajustes. Se for urgente, ligue 190.", true);
+  }
+}
+
+(() => {
+  const btn = $("socorro");
+  if (!btn) return;
+  let timer = 0;
+  const soltar = () => { clearTimeout(timer); timer = 0; };
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    unlockAudio();
+    speak("Segure para pedir socorro.", true);
+    timer = setTimeout(() => { timer = 0; pedirSocorro(); }, 1200);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) btn.addEventListener(ev, soltar);
+  // Leitor de tela: o duplo toque do TalkBack/VoiceOver vira "click", sem
+  // pointerdown longo. Ali o próprio gesto já é deliberado, então vale.
+  btn.addEventListener("click", (e) => { if (e.detail === 0) pedirSocorro(); });
+})();
+
 // ---------------- Onde estou? ----------------
 // Situa antes de guiar: rua, confiança do GPS, para onde a pessoa está
 // virada, referências do mapa com lado e distância e, com a câmera ligada,
@@ -1430,6 +1575,12 @@ const campoEndpoint = $("campoEndpointNuvem");
 
 chkAberto.checked = prefs.aberto;
 chkNuvem.checked = prefs.nuvemLigada;
+const campoContato = $("campoContatoSocorro");
+const selSocorro = $("selSocorroModo");
+campoContato.value = prefs.contatoSocorro;
+selSocorro.value = prefs.socorroModo;
+campoContato.addEventListener("change", () => { prefs.contatoSocorro = campoContato.value.trim(); salvarPrefs(); });
+selSocorro.addEventListener("change", () => { prefs.socorroModo = selSocorro.value; salvarPrefs(); });
 campoChave.value = prefs.chaveGoogle;
 campoEndpoint.value = prefs.endpointNuvem;
 $("contaVocabulario").textContent =

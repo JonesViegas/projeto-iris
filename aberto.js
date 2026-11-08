@@ -118,16 +118,38 @@ export const VOCABULARIO = [
     ["an open metal gate", "a garage entrance"]),
 ];
 
+/**
+ * Ameaças: fora do VOCABULARIO de propósito. Não ganham nome no núcleo, não
+ * entram na narração nem na descrição, não viram dado público. Saem com o
+ * rótulo interno "firearm" e só o avaliador de ameaças (ameacas.js) fala
+ * delas — sempre como "possível", e só depois de confirmar.
+ *
+ * O OWL-ViT reconhece arma mal: confunde com celular, furadeira, guarda-chuva.
+ * Por isso o limiar é alto e a confirmação é obrigatória. O caminho certo é o
+ * detector treinado (treino/classes.yaml, classe arma_de_fogo).
+ */
+export const AMEACAS_ABERTAS = [
+  { rotulo: "firearm", consultas: ["a person holding a handgun", "a pistol gun", "a rifle"], limiar: 0.22 },
+];
+for (const a of AMEACAS_ABERTAS) a.grupo = "ameaca";
+
 // Uma consulta pode pertencer a vários itens; este índice devolve o item a
 // partir da frase que o modelo casou.
 const POR_CONSULTA = new Map();
 for (const item of VOCABULARIO) for (const c of item.consultas) POR_CONSULTA.set(c, item);
+const POR_CONSULTA_AMEACA = new Map();
+for (const a of AMEACAS_ABERTAS) for (const c of a.consultas) POR_CONSULTA_AMEACA.set(c, a);
+
+/** Consultas só de ameaça, para a segunda olhada de confirmação (rápida: 2 frases). */
+export function consultasDeAmeaca() {
+  return AMEACAS_ABERTAS.flatMap((a) => a.consultas.slice(0, 2));
+}
 
 /** O piso entra em toda passada; o resto se reveza. */
 // Dez e não dezesseis: cada consulta é uma passagem a mais pelo modelo, e num
 // celular de 4 GB a diferença entre dez e dezesseis é a diferença entre
 // devolver uma resposta e o navegador matar a aba.
-export function montarConsultas(rodada = 0, maxConsultas = 10) {
+export function montarConsultas(rodada = 0, maxConsultas = 10, { incluirAmeaca = false } = {}) {
   const piso = VOCABULARIO.filter((v) => v.grupo === Grupo.PISO);
   const outros = VOCABULARIO.filter((v) => v.grupo !== Grupo.PISO);
   const sel = [...piso];
@@ -143,7 +165,11 @@ export function montarConsultas(rodada = 0, maxConsultas = 10) {
     if (frases.length >= maxConsultas) break;
     if (v.consultas[1]) frases.push(v.consultas[1]);
   }
-  return frases.slice(0, maxConsultas);
+  // Uma frase de ameaça em toda passada, no lugar da última: custa uma
+  // consulta e é o que permite notar uma possível arma sem pedir.
+  const saida = frases.slice(0, maxConsultas);
+  if (incluirAmeaca) saida[saida.length - 1] = AMEACAS_ABERTAS[0].consultas[0];
+  return saida;
 }
 
 // ============================================================
@@ -165,6 +191,7 @@ export class DetectorAberto {
     this.rodada = 0;
     this.ultimoMs = 0;
     this.erro = null;
+    this.ameacas = true;       // uma consulta de ameaça por passada
   }
 
   get pronto() { return this.pipe !== null; }
@@ -209,7 +236,7 @@ export class DetectorAberto {
       canvas.height = h;
       ctx.drawImage(video, 0, 0, w, h);
 
-      const frases = consultas ?? montarConsultas(this.rodada++);
+      const frases = consultas ?? montarConsultas(this.rodada++, 10, { incluirAmeaca: this.ameacas });
       const entrada = this.RawImage ? this.RawImage.fromCanvas(canvas)
         : canvas.toDataURL("image/jpeg", 0.85);
 
@@ -217,6 +244,19 @@ export class DetectorAberto {
 
       const dets = [];
       for (const d of saida ?? []) {
+        const ameaca = POR_CONSULTA_AMEACA.get(d.label);
+        if (ameaca) {
+          if (d.score < ameaca.limiar) continue;
+          const b = d.box;
+          dets.push({
+            label: ameaca.rotulo, pt: null, risco: "ameaca", grupo: "ameaca", aberto: true, score: d.score,
+            box: {
+              left: Math.max(0, Math.min(1, b.xmin / w)), top: Math.max(0, Math.min(1, b.ymin / h)),
+              right: Math.max(0, Math.min(1, b.xmax / w)), bottom: Math.max(0, Math.min(1, b.ymax / h)),
+            },
+          });
+          continue;
+        }
         const item = POR_CONSULTA.get(d.label);
         const limiar = limiarGeral ?? item?.limiar ?? 0.15;
         if (d.score < limiar) continue;

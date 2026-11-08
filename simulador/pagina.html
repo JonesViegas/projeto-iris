@@ -66,6 +66,7 @@
   .tipo.agora { color: var(--agora); }
   .tipo.alerta { color: var(--alerta); }
   .tipo.ambiente { color: var(--ambiente); }
+  .tipo.ameaca { color: #FFF; background: var(--alerta); border-color: var(--alerta); }
   .texto { font-size: 1.02rem; }
   .nota { font-size: .82rem; color: var(--suave); font-style: italic; }
   .pausa { font: .78rem/1 var(--f-dado); color: var(--suave); padding: 2px 12px 2px 5.6rem; }
@@ -93,7 +94,7 @@
 
 <div class="wrap">
   <header>
-    <span class="marca">Projeto Íris · 0.10</span>
+    <span class="marca">Projeto Íris · 0.11</span>
     <h1>Ouça o que o Íris diria</h1>
     <p class="intro">Cada cena roda o mesmo código do aplicativo com uma rua, um GPS e uma câmera de mentira. Toque numa cena e em Ouvir. Nada aqui usa sua câmera nem sua localização.</p>
   </header>
@@ -139,8 +140,8 @@
   let execucao = 0;
 
   // ---- escolha de cena ----
-  const ordemGrupos = ["Situar", "Andar", "Câmera"];
-  const rotuloGrupo = { Situar: "Onde estou", Andar: "Navegação a pé", "Câmera": "Câmera ligada" };
+  const ordemGrupos = ["Situar", "Andar", "Ameaças", "Câmera"];
+  const rotuloGrupo = { Situar: "Onde estou", Andar: "Navegação a pé", "Ameaças": "Ameaças", "Câmera": "Câmera ligada" };
   const grupos = $("grupos");
   for (const g of ordemGrupos) {
     const lista = CENAS.filter((c) => c.grupo === g);
@@ -200,7 +201,7 @@
       li.className = "fala"; li.id = `fala-${i}`;
       const quando = l.metros != null ? `<b>${l.metros} m</b>${fmtT(l.t)}` : `<b>${fmtT(l.t)}</b>`;
       li.innerHTML = `<div class="quando">${quando}</div><div class="corpo"><span class="tipo ${l.tipo}"></span><span class="texto"></span></div>`;
-      li.querySelector(".tipo").textContent = { aviso: "aviso", agora: "agora", alerta: "alerta", ambiente: "ambiente" }[l.tipo] || l.tipo;
+      li.querySelector(".tipo").textContent = { aviso: "aviso", agora: "agora", alerta: "alerta", ambiente: "ambiente", ameaca: "ameaça" }[l.tipo] || l.tipo;
       li.querySelector(".texto").textContent = l.texto;
       if (l.nota) { const n = document.createElement("span"); n.className = "nota"; n.textContent = l.nota; li.querySelector(".corpo").appendChild(n); }
       li.addEventListener("click", () => { parar(); falar(l.texto); marcar(i); });

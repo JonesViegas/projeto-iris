@@ -347,9 +347,10 @@ test("alerta de cortante é hedgeado e absorve o alerta da pessoa", () => {
     `não pode repetir a pessoa em separado: ${seguinte?.text}`);
 });
 
-test("COCO não detecta arma de fogo, e isso é contratual", () => {
-  // Se um dia alguém adicionar uma classe de arma, este teste força a revisão
-  // da comunicação ao usuário e do README antes de prometer qualquer coisa.
+test("arma de fogo não tem nome no núcleo, e isso é contratual", () => {
+  // Quem fala de possível arma é só o avaliador de ameaças (ameacas.js), com
+  // confirmação e cautela. Se ela ganhar nome em NOMES, a narração e o alerta
+  // comum passam a anunciá-la sem cautela nenhuma — este teste impede isso.
   assert.ok(!Object.keys(NOMES).some((k) => /gun|pistol|firearm|weapon|rifle/i.test(k)));
   for (const c of OBJETOS_CORTANTES) assert.ok(NOMES[c], `${c} precisa de nome em português`);
 });
@@ -401,4 +402,15 @@ test("alerta: semáforo que muda de cor fala na hora", () => {
   assert.match(e.process(sem("vermelho"), 100).text, /vermelho/);
   const v = e.process(sem("verde"), 1200) ?? e.process(sem("verde"), 1300);
   assert.match(v?.text ?? "", /verde/);
+});
+
+test("alerta: distância oscilando entre duas faixas com o objeto parado não vira vaivém falado", () => {
+  const e = new AlertEngine();
+  const falas = [];
+  for (let t = 0; t <= 20000; t += 100) {
+    const d = Math.floor(t / 1500) % 2 ? 2.0 : 1.5;
+    const a = e.process([obj("person", Direction.FRENTE, Proximity.PERTO, true, { distanceM: d })], t);
+    if (a) falas.push(a.text);
+  }
+  assert.ok(falas.length <= 4, `falou ${falas.length} vezes: ${falas.join(" | ")}`);
 });

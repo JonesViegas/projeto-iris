@@ -64,6 +64,25 @@ classes:
     precisao_min: 0.85     # mas dizer que há quando não há desorienta
     fontes: [coleta-propria]
 
+  - id: 6
+    nome: arma_de_fogo
+    pt: possível arma de fogo
+    descricao: revólver, pistola ou espingarda visível, na mão de alguém ou não
+    # Aqui o erro caro é o FALSO POSITIVO: dizer "arma" quando é um celular ou
+    # uma furadeira causa pânico e pode pôr um inocente em risco. Por isso a
+    # precisão mínima é a mais alta da lista. O app ainda exige confirmação em
+    # dois momentos e fala sempre "possível" (ameacas.js), então um recall um
+    # pouco menor é tolerável: a pessoa nunca deve depender só disto.
+    recall_perto: 0.75
+    precisao_min: 0.95
+    # Conjuntos públicos de detecção de armas existem (por exemplo, o de
+    # Olmos et al., 2018, de pistolas em vídeo, e coleções em Roboflow
+    # Universe), mas são em sua maioria imagens de filme e de câmera de
+    # segurança. Precisam de negativos difíceis: celular na mão, controle
+    # remoto, furadeira, guarda-chuva, carteira preta.
+    fontes: [olmos-2018-handgun, roboflow-weapons, negativos-dificeis]
+    negativos_obrigatorios: [celular, controle_remoto, furadeira, guarda_chuva, carteira]
+
 # Como a validação mede "perto"
 faixas_m:
   perto: [0.0, 4.0]

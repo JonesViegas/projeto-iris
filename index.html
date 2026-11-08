@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.10.0">
+<meta name="iris-versao" content="0.11.0">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -147,8 +147,8 @@
   .rota {
     margin: 0 12px 8px; display: grid; gap: 8px; align-items: center;
   }
-  body:not([data-navegando="true"]) .rota { grid-template-columns: 1fr 1fr; }
-  body[data-navegando="true"] .rota { grid-template-columns: 1fr auto; }
+  body:not([data-navegando="true"]) .rota { grid-template-columns: 1fr 1fr auto; }
+  body[data-navegando="true"] .rota { grid-template-columns: auto 1fr auto; }
   .rota button {
     border: 0; border-radius: 14px; min-height: 58px; cursor: pointer;
     font: inherit; font-weight: 700; font-size: 1rem;
@@ -160,9 +160,14 @@
   #ondeEstou { background: rgba(127,233,255,.14); color: var(--ciano-claro);
         border: 1px solid rgba(127,233,255,.3); width: 100%; }
   body[data-navegando="true"] #ondeEstou { display: none; }
+  #socorro { background: #C62828; color: #FFF; padding: 0 14px; letter-spacing: .06em;
+        font-weight: 800; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #socorro:active { transform: scale(.96); background: #E53935; }
   #blocoLugares { border: 1px solid rgba(127,233,255,.25); border-radius: 14px;
         padding: 10px 12px; margin: 0 0 12px; }
-  #blocoLugares legend { padding: 0 6px; font-weight: 700; }
+  #blocoLugares legend, #blocoSocorro legend { padding: 0 6px; font-weight: 700; }
+  #blocoSocorro { border: 1px solid rgba(255,107,107,.35); border-radius: 14px;
+        padding: 10px 12px; margin: 0 0 12px; }
   #pararRota { background: var(--parar); color: #FFF; padding: 0 16px; }
   .rota-info { min-width: 0; line-height: 1.25; }
   .rota-info b {
@@ -318,6 +323,9 @@
       </svg>
       Onde estou?
     </button>
+    <button id="socorro" type="button" aria-label="Socorro. Segure para pedir ajuda com a sua localização">
+      SOS
+    </button>
     <span class="rota-info">
       <b id="navDestino"></b>
       <span id="navRestante"></span>
@@ -471,6 +479,22 @@
         <p class="nota" id="listaLugares"></p>
         <button class="sec" id="esquecerLugares" type="button">Esquecer todos os lugares</button>
         <p class="nota">Guarda só uma assinatura numérica de cada imagem, nunca a foto. Fica no aparelho.</p>
+      </fieldset>
+
+      <fieldset class="campo" id="blocoSocorro">
+        <legend>Socorro — segure o botão SOS</legend>
+        <label class="campo">
+          Contato de confiança (celular com DDD)
+          <input type="tel" id="campoContatoSocorro" autocomplete="tel" placeholder="(65) 99999-0000">
+        </label>
+        <label class="campo">
+          Ao segurar SOS
+          <select id="selSocorroModo">
+            <option value="contato">Mandar minha localização ao contato</option>
+            <option value="190">Ligar para o 190</option>
+          </select>
+        </label>
+        <p class="nota">A mensagem abre pronta, com o mapa; você confirma o envio. Nada é enviado sozinho.</p>
       </fieldset>
 
       <label class="linha-check">

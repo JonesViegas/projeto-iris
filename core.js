@@ -63,8 +63,11 @@ export const VEHICLES = new Set(["car", "motorcycle", "bus", "truck", "bicycle",
 
 /**
  * Objetos pontiagudos ou contundentes que o COCO reconhece.
- * ATENÇÃO: o COCO **não tem classe de arma de fogo**. Detectar pistola exige
- * modelo treinado à parte — não existe neste app e não deve ser prometido.
+ * ATENÇÃO: o COCO **não tem classe de arma de fogo**. Possível arma de fogo é
+ * assunto de ameacas.js (rótulo interno "firearm", vindo do vocabulário aberto
+ * ou de um detector treinado), que exige confirmação e fala sempre "possível".
+ * Ela NUNCA ganha nome aqui em NOMES: assim não entra na narração, na
+ * descrição nem no alerta comum, que falariam sem cautela.
  * O que há aqui é faca, tesoura e taco, e mesmo esses a gente anuncia de forma
  * hedgeada ("objeto pontiagudo"), porque falso positivo aqui causa pânico.
  */
@@ -144,7 +147,8 @@ export class AlertEngine {
     Object.assign(this, { requiredStreak, repeatCooldownMs, minIntervalMs, repeatParadoMs });
     this.streaks = new Map();
     this.lastSpoken = new Map();
-    this.ultimoPorObjeto = new Map();   // streakKey -> { ts, dist }
+    this.ultimoPorObjeto = new Map();   // streakKey -> { ts, nucleo }
+    this.silencio = new Map();          // classe -> até quando (ameaça já falou dela)
     this.lastAnyMs = null;
   }
 
@@ -170,6 +174,7 @@ export class AlertEngine {
     let best = null;
     for (const c of byKey.values()) {
       if (c.priority === Priority.BAIXA) continue;
+      if ((this.silencio.get(c.streakKey.split("|")[0]) ?? -Infinity) > nowMs) continue;
       if ((this.streaks.get(c.streakKey) ?? 0) < this.requiredStreak) continue;
       const last = this.lastSpoken.get(c.key);
       if (last !== undefined && nowMs - last < this.repeatCooldownMs) continue;
@@ -177,6 +182,10 @@ export class AlertEngine {
       // frente, a dois metros e meio" para "Atenção, pessoa à frente, a dois
       // metros e meio" no mesmo segundo repete a frase sem informação nova.
       const ult = this.ultimoPorObjeto.get(c.streakKey);
+      // Vaivém: a estimativa oscila entre "dois metros" e "um metro e meio"
+      // com o objeto parado. Voltar à frase de antes não é novidade.
+      if (ult && !c.vindo && ult.anterior === nucleoDaFrase(c.text)
+          && nowMs - ult.tsAnterior < this.repeatParadoMs) continue;
       if (ult && ult.nucleo === nucleoDaFrase(c.text)
           && nowMs - ult.ts < (c.vindo ? this.repeatCooldownMs
             : c.priority === Priority.ALTA ? this.repeatParadoMs / 2 : this.repeatParadoMs)) continue;
@@ -187,12 +196,26 @@ export class AlertEngine {
         && nowMs - this.lastAnyMs < this.minIntervalMs) return null;
 
     this.lastSpoken.set(best.key, nowMs);
-    this.ultimoPorObjeto.set(best.streakKey, { ts: nowMs, nucleo: nucleoDaFrase(best.text) });
+    const prev = this.ultimoPorObjeto.get(best.streakKey);
+    this.ultimoPorObjeto.set(best.streakKey, {
+      ts: nowMs, nucleo: nucleoDaFrase(best.text),
+      anterior: prev?.nucleo ?? null, tsAnterior: prev?.ts ?? -Infinity,
+    });
     this.lastAnyMs = nowMs;
     return best;
   }
 
-  reset() { this.streaks.clear(); this.lastSpoken.clear(); this.ultimoPorObjeto.clear(); this.lastAnyMs = null; }
+  reset() {
+    this.streaks.clear(); this.lastSpoken.clear(); this.ultimoPorObjeto.clear();
+    this.silencio.clear(); this.lastAnyMs = null;
+  }
+
+  /**
+   * O avaliador de ameaças acabou de falar desta classe ("Pare. Moto vindo
+   * pela direita"). Por alguns segundos o alerta comum não repete o mesmo
+   * objeto com outras palavras.
+   */
+  silenciar(classe, ateMs) { this.silencio.set(classe, ateMs); }
 
   #candidate(o) {
     const label = o.detection.label;
