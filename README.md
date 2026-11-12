@@ -237,6 +237,91 @@ Mais dois ajustes de apoio:
 
 Reproduzir: `node test/simular.mjs` e `node --test "test/*.test.mjs"`.
 
+## Segunda visão: o que parou de piscar (0.15)
+
+A 0.14 cortou a repetição *literal*. A 0.15 foi atrás do que sobrava, e o que
+sobrava eram quatro defeitos diferentes com o mesmo sintoma para quem ouve:
+"o app descreve a mesma coisa várias vezes e os avisos ficam indo e vindo".
+
+**1. Histerese, em `estavel.js`.** `analyzeSpatial` decide tudo quadro a
+quadro, com limites secos: direção pelo centro da caixa em 0,35 e 0,65, faixa
+de distância em 2,5 m e 8,0 m. Um poste a 2,5 m não fica parado no número — a
+caixa treme, e ele alterna PERTO/MÉDIO várias vezes por segundo; um carro com
+o centro perto de 0,65 é "à frente" num quadro e "à direita" no seguinte.
+
+Como o freio de repetição é indexado por `classe|direção`, trocar de direção
+criava chave nova e o **mesmo poste era anunciado duas vezes, com dois lados
+diferentes**. Não é informação a mais: é a direção — o dado com que a pessoa
+desvia — sendo destruída.
+
+Agora trocar de estado custa mais do que permanecer nele, e a margem é
+**assimétrica a favor da segurança**: aproximar vale no limite seco, na hora;
+afastar exige passar da margem.
+
+**2. Marcação constante, não "já se afastou".** O app dizia reconhecer quando
+você está só passando por um objeto, mas media a coisa errada: perguntava se a
+distância já tinha começado a aumentar — o que, num carro estacionado,
+acontece quando ele já ficou para trás. Até lá ele era "obstáculo perto no seu
+caminho", com direito a "Atenção". Agora vale o teste que marinheiro e piloto
+usam: o que vai te acertar permanece na mesma direção, o que você vai passar
+escorrega para a borda do quadro.
+
+**3. O corredor passou a ser medido em metros.** "No meu caminho" era posição
+na imagem — um cone, não uma faixa. A ±0,20 da largura correspondem ±12 graus:
+42 cm a dois metros (certo) e **1,70 m a oito metros** (completamente errado).
+Um poste a um metro do seu ombro, oito metros à frente, caía dentro do
+"corredor". Agora as bordas da caixa são projetadas em metros e comparadas com
+uma faixa de 1,20 m — que é a faixa livre mínima da NBR 9050, de propósito: o
+que o app chama de obstrução é o que a norma chama de obstrução.
+
+**4. Habituação, em `fala.js`.** Sobrava a repetição que nenhum freio pegava,
+porque cada caso era mesmo novo: sete *"Parquímetro à frente"*, nove *"Carro
+passando à direita"* em noventa segundos — postes a cada quinze metros, carros
+a cada seis. Objetos diferentes, notícia idêntica.
+
+Cada família de frase tem um contador; a cada repetição o silêncio exigido
+dobra; depois de três, a família emudece e sai **uma** frase de paisagem no
+lugar: *"Há parquímetros ao longo da sua esquerda."* Diz o padrão, que é o que
+constrói o mapa mental da calçada, e cala sobre os casos.
+
+**Duas coisas nunca se habituam**, e são o que impede isto de ficar perigoso:
+o que é urgente, e **o que está no seu caminho**. A segunda proteção faltava, e
+foi o teste de persona que achou o buraco: um poste plantado no meio da calçada
+entra em cena como prioridade média, e a família "parquímetro à frente" já
+tinha sido emudecida pelos postes do meio-fio. O aviso saía a 3,5 m em vez de
+8 m — quatro metros a menos, que a 1,2 m/s são três segundos e meio.
+
+**Resultado medido** (cenário `quadra`, 90 s de calçada com mobiliário parado
+dos dois lados e dois acontecimentos de verdade):
+
+| | falas | frases repetidas | com "Atenção"/"Cuidado" |
+|---|---|---|---|
+| antes | 36 | 23 | 22 |
+| depois | 17 | 4 | 5 |
+
+Os dois acontecimentos reais — a pessoa vindo de frente e o poste no caminho —
+continuam anunciados, com a urgência subindo conforme a distância cai.
+
+Reproduzir: `node test/simular.mjs quadra`, `node test/simular.mjs
+--comparar-estavel` e `node --test "test/*.test.mjs"`.
+
+## O obstáculo que o mobiliário urbano emudecia (0.15)
+
+O defeito mais grave que o simulador encontrou, e ele era anterior a tudo isto.
+
+`AlertEngine.process` monta um candidato por chave `classe|direção` e ficava
+com **o primeiro da lista**. Numa calçada com parquímetros ao longo do
+meio-fio, os de longe são lidos como "à frente" — a 20 m, um metro de desvio
+lateral dá menos de três graus. Eles chegavam primeiro e tomavam a chave, que
+para eles é inofensiva: longe, fora do caminho, prioridade baixa.
+
+Quando um poste **plantado no meio da calçada** aparecia, ele gerava a mesma
+chave e era descartado ali, antes de qualquer decisão. Medido: anunciado
+normalmente quando sozinho na cena, **nunca** anunciado com os outros em volta.
+
+Agora a chave fica com o candidato mais grave, e o empate, com o mais próximo.
+Guardado por `test/estavel.test.mjs`.
+
 ## Caixa degenerada: um suspeito dos sustos (0.14)
 
 Perseguindo o item 4 acima, o simulador entregou ao `analyzeSpatial` uma caixa
@@ -442,11 +527,15 @@ O contrato completo, e o que um adaptador não pode fazer, estão no próprio ar
 | `embedder.js` | Vetor de características do quadro (MediaPipe ImageEmbedder) |
 | `conversa.js` | **Lógica pura**: comandos de voz e memória curta da conversa |
 | `orientar.js` | **Lógica pura**: onde você está, quanto falta, caminho livre |
+| `estavel.js` | **Lógica pura**: histerese espacial, trilhas, corredor em metros |
+| `barreiras.js` | **Lógica pura**: barreiras de calçada, recorrência, denúncia |
 | `ameacas.js` | **Lógica pura**: colisão, queda, pessoa, possível arma; mensagem de socorro |
 | `ocr.js` | Leitura de texto |
 | `diario.js` | Registro da sessão para o piloto |
 | `sw.js` | Cache para uso offline |
 | `test/layout.test.mjs` | Guarda do grid: a câmera precisa ter altura |
+| `test/acessibilidade.test.mjs` | Guarda da marcação: rótulo, foco, região viva, alvo de toque |
+| `test/persona.test.mjs` | O app medido pelo que cada pessoa aguenta ouvir |
 | `test/carga.test.mjs` | Carrega o `app.js` num DOM de mentira e vê se sobrevive |
 | `simulador/` | Simulador de voz para o celular: motor, página e montagem |
 
@@ -550,6 +639,184 @@ com o custo de qualidade e de memória descrito em "Memória: o limite real do a
 O `servidor/instalar.sh` instala o Node 20 pelo NodeSource quando ele falta.
 
 ---
+
+## Acessibilidade: o app usado com leitor de tela (0.15)
+
+**Toda pessoa cega que usa este app tem VoiceOver ou TalkBack ligado.** É assim
+que ela instalou o app, abriu o app e achou os botões. E, até a 0.14, o Íris
+dizia cada frase **duas vezes** — uma pela própria voz, outra pelo leitor de
+tela, porque a barra de status jogava o mesmo texto numa região
+`aria-live="assertive"`.
+
+Pior que o eco: `assertive` manda o leitor de tela **interromper** o que estava
+lendo. A pessoa não conseguia ouvir o rótulo de um botão até o fim, porque cada
+aviso do app cortava a frase no meio.
+
+Nos Ajustes há agora **Quem fala**:
+
+| | A voz do Íris | O leitor de tela |
+|---|---|---|
+| **Íris** (padrão) | tudo | nada |
+| **Leitor de tela** | só obstáculo e manobra | todo o resto |
+| **Os dois** | tudo | tudo (vai repetir) |
+
+Cada frase tem um dono só. O padrão é "Íris" porque é o único valor com que o
+app funciona para quem não usa leitor de tela; quem usa troca em dois toques.
+Obstáculo e manobra continuam na voz do Íris mesmo no modo leitor: a fila do
+leitor de tela pode estar ocupada lendo um botão, e atrasar um "pare" custa
+caro. Regra em `politicaDeVoz()`, em `fala.js`.
+
+**Outros defeitos corrigidos na mesma auditoria:**
+
+- **A página não tinha cabeçalho nenhum.** Quem usa leitor de tela navega por
+  cabeçalhos antes de tudo; o atalho de "próximo cabeçalho" não levava a lugar
+  nenhum e a pessoa varria a tela elemento por elemento.
+- **Dois dos três botões da barra usavam `disabled`**, e VoiceOver e TalkBack
+  **pulam** controles desabilitados. Varrendo a barra inferior, a pessoa achava
+  só o botão do meio e nunca descobria que "Ler texto" e "O que tem aqui?"
+  existem. Agora é `aria-disabled`: o botão continua encontrável, é anunciado
+  como indisponível, e tocar nele diz em voz alta o que falta fazer.
+- **O botão Conversar tinha três estados e dois rótulos.** "Ouvindo… fale
+  agora" e "Um instante…" produziam exatamente o mesmo nome acessível, então a
+  transição não era anunciada — e saber se o app ainda está ouvindo é a única
+  coisa que importa na hora de falar.
+- **Uma região viva `assertive` para tudo** virou duas: `polite` para o comum,
+  `assertive` só para o obstáculo iminente.
+
+Tudo isso é guardado por `test/acessibilidade.test.mjs`, que falha se alguém
+trocar `aria-disabled` por `disabled`, acrescentar botão sem rótulo, bloquear o
+zoom ou criar uma segunda região `assertive`. Acessibilidade quebra em
+silêncio: não dá erro, não aparece na tela, e quem percebe é o usuário cego, na
+rua, meses depois.
+
+## Barreiras de calçada e denúncias (0.15)
+
+O que o Íris percebia morria na sessão. A pessoa desviava do buraco, chegava em
+casa, e o buraco continuava lá para a próxima pessoa — o app era um instrumento
+individual num problema coletivo.
+
+`barreiras.js` guarda cada buraco, bueiro aberto, tapume e degrau com local e
+data. E guarda o que **nenhum sensor produz**: a dificuldade que a barreira
+causou. A diferença entre *"havia um tapume na calçada"* e *"havia um tapume na
+calçada e eu precisei descer para a rua"* é a diferença entre um dado e uma
+denúncia.
+
+**O relato entra pela voz**, porque é o único caminho possível: uma pessoa cega
+parada numa calçada quebrada não vai procurar botão na tela. Basta dizer o que
+aconteceu — *"tropecei"*, *"tive que descer para a rua"*, *"não consegui
+passar"*, *"eu caí"* — e o app completa o registro da barreira que acabou de
+detectar, em vez de criar outro caso.
+
+**A taxonomia não é nossa, de propósito**: são os seis tipos de barreira usados
+no projeto Caminhar (Unifor / MPCE / LINO), que organiza reclamações de calçada
+para fiscalização. Usar a mesma categorização é o que permite ao registro do
+Íris entrar num painel que já existe, em vez de criar mais uma ilha de dados.
+
+| Tipo | Norma |
+|---|---|
+| Passeio ausente | NBR 9050 6.10; Lei 13.146/2015 art. 3º |
+| Infraestrutura degradada | NBR 9050 6.1.1; Código de Posturas |
+| Pavimentação inadequada às normas técnicas | NBR 9050 6.1.1 e 6.9 |
+| Piso tátil inadequado ou ausente | NBR 9050 6.9; NBR 16537 |
+| Ocupação irregular | NBR 9050 6.1.2 (faixa livre de 1,20 m) |
+| Falta de sinalização sonora | NBR 9050 6.12.2; CTB art. 80 §2º |
+
+**Recorrência por distância, não por grade.** Cinco pessoas tropeçando no mesmo
+buraco não são cinco buracos, e é a recorrência que move a fiscalização. A
+primeira versão arredondava a coordenada para uma grade de 20 m — e nenhuma
+grade serve: dois registros a dois metros caem em células diferentes sempre que
+calham de estar nos dois lados de uma fronteira. Medido: cinco registros do
+mesmo buraco, dentro de nove metros, viraram três "buracos". Agora a ocorrência
+entra no caso mais próximo dentro de 20 m, e o centro do caso acompanha as
+leituras.
+
+**A prioridade é o dano, não a frequência.** Gravidade do tipo × recorrência,
+mais o que de fato aconteceu com as pessoas. Uma barreira que já derrubou
+alguém passa à frente de uma mais frequente em que todos desviaram tranquilos.
+
+**O que a denúncia sempre diz**, e não é rodapé — é o que a mantém de pé: que a
+classificação é automática e pode errar, que a localização vem de GPS de
+celular com erro de 5 a 20 m, e que é recomendada verificação em campo. Sem
+isso, a primeira contestação derruba o conjunto inteiro, inclusive as denúncias
+corretas.
+
+**Nada sai do aparelho.** O registro mora no `localStorage`; exportar é um
+toque consciente em Ajustes → "Exportar denúncias". O arquivo não leva imagem
+nenhuma e não identifica a pessoa: tipo, local aproximado, data e o que ela
+contou.
+
+**Material de treino.** `manifestoDeTreino()` monta o que o pipeline de
+[`treino/`](treino/) consome, agrupado **por local** — tudo do mesmo ponto vai
+junto para treino ou para validação, nunca para os dois. Sem isso o treino vira
+decoreba: trinta fotos do mesmo buraco espalhadas dão mAP alto e modelo inútil.
+Só entra o que tem evidência que a pessoa consentiu em guardar.
+
+## Testes com personas (0.15)
+
+`test/persona.test.mjs` é diferente dos outros testes: os outros verificam
+regras ("a faixa não oscila"), este verifica **pessoas**. Monta a caminhada de
+alguém com um jeito específico de andar e de ouvir, e cobra do app um orçamento
+que aquela pessoa aguenta.
+
+| Persona | Anda a | Orçamento | Por quê |
+|---|---|---|---|
+| Bengala, cegueira congênita | 1,2 m/s | 10 falas/min | A bengala já encontra o chão: repetir o que ela diz é ruído puro |
+| Cão-guia | 1,5 m/s | 8 falas/min | O cão já desvia de obstáculo fixo; falta orientação, não inventário |
+| Baixa visão | 1,0 m/s | 12 falas/min | Enxerga vulto; falta o detalhe e o degrau |
+| Cegueira + perda auditiva | 0,8 m/s | 6 falas/min | Cada frase compete com o trânsito pelo pouco que ela escuta |
+
+Os testes cobram, para **todas** elas: orçamento de fala respeitado, nenhuma
+frase repetida mais de três vezes em dois minutos, obstáculo no caminho
+anunciado a **pelo menos 4 metros** (três passos — o mínimo com que uma bengala
+longa ainda encontra o obstáculo antes do corpo), perigo nunca habituado, e
+quadra sem acontecimento nenhum terminando sem um único alarme.
+
+Foi este arquivo que encontrou a habituação atrasando o aviso de um obstáculo
+real e o corredor medido em ângulo. **Os números são contrato**: quem mudar a
+política de fala e quebrar um deles defende o número novo, não ajusta o teste
+até passar.
+
+O protocolo para as sessões com pessoas de verdade — perfis, roteiros,
+consentimento falado e critério de reprovação — está em
+[`docs/PROTOCOLO-TESTE-CEGOS.md`](docs/PROTOCOLO-TESTE-CEGOS.md).
+
+## Travamentos: três causas, e por que não deixavam rastro (0.15)
+
+Relato de campo: *"ao marcar nas configurações identificar calçadas, o app para
+e trava"*. Eram três defeitos somados.
+
+**1. O laço de quadros podia morrer.** `processFrame` era protegido;
+`bombearFala()` não era. Uma exceção ali escapava **antes** do
+`requestAnimationFrame` da última linha, e o laço simplesmente não se
+reagendava. O que a pessoa vê quando isso acontece é o pior cenário possível: a
+câmera continua ligada, a imagem continua na tela, o app parece aceso — e não
+fala mais nada, nunca. Quem não enxerga não tem como perceber que a imagem
+congelou, e continua andando confiando num app que parou de olhar. O
+reagendamento agora mora num `finally`.
+
+**2. Carga concorrente de modelo.** `if (this.pipe) return` só protege depois
+que o `await` terminou, e entre o começo e o fim passam segundos. Marcar
+"identificar calçadas" com a percepção ligada disparava uma carga, o `start()`
+disparava outra, marcar e desmarcar disparava mais — cada uma instanciando um
+SegFormer inteiro, ~120 MB. O navegador mata a aba sem evento, sem erro e sem
+log. O mesmo valia para o reconhecimento ampliado, a ~250 MB por cópia.
+
+**3. Desligar não devolvia a memória.** Desmarcar a calçada parava o laço e
+deixava o modelo carregado pelo resto da sessão. Quem desligasse a calçada para
+ligar o ampliado — que é exatamente o que o app manda fazer — ficava com os
+dois na memória mesmo tendo escolhido um.
+
+Mais duas correções de apoio: o aviso de calçada ganhou **porteira de memória**
+(era o segundo modelo mais caro e o único dos pesados sem nenhuma), e o laço do
+piso passou a desacelerar também quando a análise é descartada por já haver
+outra rodando.
+
+**E uma caixa-preta.** Nenhum erro fora dos `try/catch` pontuais era registrado
+em lugar nenhum, então o relato possível era "travou". Agora todo erro não
+tratado e toda promessa rejeitada sem dono entram no diário da sessão e na
+linha de diagnóstico dos Ajustes, com a etapa em que o app estava. Não conserta
+nada — faz a falha deixar rastro, que é a diferença entre um defeito
+investigável e um defeito eterno.
 
 ## Piloto com usuários cegos
 

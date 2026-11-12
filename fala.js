@@ -53,6 +53,178 @@ export const INTERVALO_MS = {
 };
 
 // ============================================================
+// Quem fala: o Íris ou o leitor de tela
+// ============================================================
+//
+// O DEFEITO, e ele é grande: TODA pessoa cega que usar este app tem VoiceOver
+// ou TalkBack ligado. É assim que ela instala o app, abre o app e acha os
+// botões. E o Íris, até aqui, dizia cada frase DUAS VEZES — uma pela própria
+// voz, outra pelo leitor de tela, porque `mostrar()` jogava o mesmo texto numa
+// região `aria-live="assertive"`.
+//
+// Pior do que o eco: `assertive` manda o leitor de tela INTERROMPER o que
+// estava lendo. Na prática, a pessoa não conseguia ouvir a leitura de um botão
+// até o fim, porque a barra de status do app cortava a frase no meio, a cada
+// aviso. O README mandava "testar com o VoiceOver ligado para ver se as vozes
+// se atrapalham" — elas se atrapalhavam, e nada tratava disso.
+//
+// A correção é escolher UM dono para cada mensagem:
+//
+//   IRIS   — a voz do app diz tudo. A região viva fica calada (o texto
+//            continua na tela, para quem tem baixa visão e aumenta a fonte).
+//            É o padrão, porque com ele o app funciona sem leitor de tela.
+//   LEITOR — o leitor de tela diz quase tudo, no ritmo e na voz que a pessoa
+//            já escolheu. O Íris guarda a própria voz para o que não pode
+//            esperar: obstáculo e manobra. Também aqui, cada frase tem um dono
+//            só — nunca os dois.
+//   AMBOS  — os dois. Serve para depurar e para quem quer redundância.
+//            Produz eco: é escolha consciente, não padrão.
+//
+// A região viva do alerta é a única `assertive`, e no modo LEITOR ela nem
+// chega a ser usada, porque o alerta sai pela voz do Íris.
+
+export const ModoVoz = {
+  IRIS: "iris",
+  LEITOR: "leitor",
+  AMBOS: "ambos",
+};
+
+/**
+ * Quem diz esta frase?
+ *
+ * @returns { voz, tela, assertivo }
+ *   voz       — falar pela voz do Íris (speechSynthesis)
+ *   tela      — escrever na região viva (quem lê é o leitor de tela)
+ *   assertivo — a região viva deve interromper a leitura em curso
+ */
+export function politicaDeVoz(canal, modo = ModoVoz.IRIS, { urgente = false } = {}) {
+  const critico = canal === Canal.ALERTA || canal === Canal.NAVEGACAO;
+
+  if (modo === ModoVoz.AMBOS) {
+    return { voz: true, tela: true, assertivo: canal === Canal.ALERTA && urgente };
+  }
+
+  if (modo === ModoVoz.LEITOR) {
+    // Obstáculo e manobra continuam na voz do Íris: a fila do leitor de tela
+    // pode estar ocupada lendo um botão, e atrasar "pare" custa caro.
+    if (critico) return { voz: true, tela: false, assertivo: false };
+    return { voz: false, tela: true, assertivo: false };
+  }
+
+  // ModoVoz.IRIS — a voz do app é a dona. A região viva fica calada para não
+  // duplicar; o texto segue visível na barra de status.
+  return { voz: true, tela: false, assertivo: false };
+}
+
+// ============================================================
+// Habituação: o que se repete sem consequência vira paisagem
+// ============================================================
+//
+// O DEFEITO QUE ISTO RESOLVE, medido no simulador (cenário "quadra", 90 s de
+// calçada comum): sete "Parquímetro à frente, a oito metros", seis
+// "Parquímetro à esquerda, a dois metros e meio", nove "Carro passando à
+// direita". São objetos fisicamente diferentes — postes a cada quinze metros,
+// carros a cada seis — e por isso nenhum dos freios existentes pega: cada um é
+// mesmo uma novidade. Para quem ouve, porém, é a mesma frase repetida trinta
+// vezes, e é exatamente o que o usuário cego descreve como "descrever
+// cumulativamente".
+//
+// A ideia aqui é a mais velha da percepção: HABITUAÇÃO. Quem enxerga não
+// reanalisa cada poste de uma quadra; vê o padrão uma vez, guarda "há postes
+// ao longo desta calçada", e só volta a olhar quando algo foge do padrão.
+// Narrar poste por poste não é informação a mais — é a informação sendo
+// enterrada debaixo do próprio ruído.
+//
+// Como funciona: cada família de frase (classe + direção + faixa) tem um
+// contador. A cada repetição o silêncio exigido DOBRA. Depois de algumas
+// repetições a família emudece de vez, e no lugar dela sai uma única frase de
+// paisagem — "Há parquímetros ao longo da sua esquerda." — que diz o padrão em
+// vez de recitar os casos.
+//
+// DUAS COISAS NUNCA SE HABITUAM, e são o que impede isto de virar perigoso:
+//   1. Urgência. Prioridade ALTA — o que vem na sua direção ou atravanca o seu
+//      caminho — passa sempre, quantas vezes for. Perigo nunca é paisagem.
+//   2. Mudança de família. Carro à direita vira carro à FRENTE: família nova,
+//      contador novo, fala imediata.
+//
+// Sem dependência de navegador: `node --test test/fala.test.mjs`.
+
+export class Habituacao {
+  constructor({
+    intervaloBaseMs = 9000,     // silêncio exigido depois da primeira vez
+    tetoMs = 120000,            // o silêncio dobra, mas não passa daqui
+    mudoApos = 3,               // repetições até a família virar paisagem
+    esquecerApos = 240000,      // sumiu de vista por tanto tempo: zera
+  } = {}) {
+    Object.assign(this, { intervaloBaseMs, tetoMs, mudoApos, esquecerApos });
+    this.familias = new Map();   // familia -> { n, ultimoMs, paisagemDita }
+  }
+
+  reset() { this.familias.clear(); }
+
+  /**
+   * Pode falar esta família agora?
+   *
+   * Devolve { permite, vez, paisagem }. `paisagem` fica verdadeiro UMA vez,
+   * no instante em que a família emudece: é a deixa para quem chama dizer a
+   * frase do padrão em vez da frase do caso.
+   */
+  avaliar(familia, nowMs, { urgente = false } = {}) {
+    if (!familia) return { permite: true, vez: 0, paisagem: false };
+    const f = this.familias.get(familia);
+
+    // Perigo não se habitua, e nem conta para a habituação: um carro vindo na
+    // sua direção pela terceira vez na mesma quadra é a terceira vez que você
+    // precisa saber.
+    if (urgente) return { permite: true, vez: f?.n ?? 0, paisagem: false };
+
+    if (!f) return { permite: true, vez: 0, paisagem: false };
+    if (nowMs - f.ultimoMs > this.esquecerApos) return { permite: true, vez: 0, paisagem: false };
+
+    if (f.n >= this.mudoApos) {
+      // Emudecida. Só a primeira passagem por aqui rende a frase de paisagem.
+      return { permite: false, vez: f.n, paisagem: !f.paisagemDita };
+    }
+
+    const exigido = Math.min(this.tetoMs, this.intervaloBaseMs * 2 ** (f.n - 1));
+    return { permite: nowMs - f.ultimoMs >= exigido, vez: f.n, paisagem: false };
+  }
+
+  /** Falou. Só chame depois de a frase ter saído de verdade. */
+  registrar(familia, nowMs, { urgente = false } = {}) {
+    if (!familia) return;
+    const f = this.familias.get(familia);
+    // Urgente atualiza o relógio mas não acumula habituação.
+    if (f && urgente) { f.ultimoMs = nowMs; return; }
+    if (!f || nowMs - f.ultimoMs > this.esquecerApos) {
+      this.familias.set(familia, { n: 1, ultimoMs: nowMs, paisagemDita: false });
+      return;
+    }
+    f.n++;
+    f.ultimoMs = nowMs;
+  }
+
+  /** A frase de paisagem saiu: não repetir. */
+  marcarPaisagem(familia, nowMs) {
+    const f = this.familias.get(familia);
+    if (f) { f.paisagemDita = true; f.ultimoMs = nowMs; }
+  }
+}
+
+/**
+ * "Há parquímetros ao longo da sua esquerda." — a frase que substitui a
+ * recitação. Diz o padrão, que é o que a pessoa precisa para construir o mapa
+ * mental da calçada, e cala sobre os casos, que ela não precisa.
+ */
+export function frasePaisagem(plural, direcao) {
+  if (!plural) return null;
+  const onde = direcao === "à esquerda" ? "ao longo da sua esquerda"
+    : direcao === "à direita" ? "ao longo da sua direita"
+      : "ao longo do caminho";
+  return `Há ${plural} ${onde}.`;
+}
+
+// ============================================================
 // Fila de fala
 // ============================================================
 // Guarda no máximo UMA fala pendente por canal. Se chegar outra do mesmo canal
@@ -60,10 +232,14 @@ export const INTERVALO_MS = {
 // de agora vale mais do que o de meio segundo atrás.
 
 export class FilaDeFala {
-  constructor({ validade = VALIDADE_MS, intervalo = INTERVALO_MS, cooldownChaveMs = 6000 } = {}) {
+  constructor({
+    validade = VALIDADE_MS, intervalo = INTERVALO_MS, cooldownChaveMs = 6000,
+    habituacao = new Habituacao(),
+  } = {}) {
     this.validade = validade;
     this.intervalo = intervalo;
     this.cooldownChaveMs = cooldownChaveMs;
+    this.habituacao = habituacao;
     this.pendentes = new Map();     // canal -> item
     this.ultimaDoCanal = new Map(); // canal -> ts da última fala emitida
     this.ultimaChave = new Map();   // chave -> ts da última fala emitida
@@ -75,6 +251,7 @@ export class FilaDeFala {
     this.pendentes.clear();
     this.ultimaDoCanal.clear();
     this.ultimaChave.clear();
+    this.habituacao.reset();
     this.ultimoTexto = null;
     this.ultimoTs = 0;
   }
@@ -99,8 +276,32 @@ export class FilaDeFala {
       if (ult !== undefined && agoraMs - ult < cd) return false;
     }
 
+    // Habituação. Os freios acima comparam FRASES e CHAVES; este compara
+    // FAMÍLIAS, e é o único que percebe que trinta postes diferentes produzem
+    // a mesma notícia. Ver a classe Habituacao, acima.
+    let texto = item.texto;
+    let familia = item.familia ?? null;
+    // `semHabituacao` é mais largo que `urgente`: cobre também o obstáculo que
+    // está no caminho da pessoa mas ainda não é emergência. Ver o comentário
+    // em core.js, no candidato do AlertEngine.
+    const imune = item.semHabituacao === true || item.urgente === true;
+    if (familia) {
+      const h = this.habituacao.avaliar(familia, agoraMs, { urgente: imune });
+      if (!h.permite) {
+        if (!h.paisagem) return false;
+        const p = frasePaisagem(item.plural, item.direcao);
+        if (!p) return false;
+        // A família emudeceu: no lugar do caso, o padrão — uma vez só.
+        texto = p;
+        this.habituacao.marcarPaisagem(familia, agoraMs);
+        familia = null;   // a frase de paisagem não se habitua: ela é única
+      }
+    }
+
     this.pendentes.set(canal, {
       ...item,
+      texto,
+      familia,
       canal,
       nascidaEm: agoraMs,
       morreEm: agoraMs + (item.validadeMs ?? this.validade[canal] ?? 2000),
@@ -138,6 +339,13 @@ export class FilaDeFala {
 
     this.pendentes.delete(canal);
     this.ultimaDoCanal.set(canal, agoraMs);
+    // A habituação conta frases EMITIDAS, não oferecidas: uma frase que a fila
+    // engoliu nunca chegou ao ouvido e não pode contar como repetição.
+    if (item.familia) {
+      this.habituacao.registrar(item.familia, agoraMs, {
+        urgente: item.semHabituacao === true || item.urgente === true,
+      });
+    }
     if (item.chave) {
       this.ultimaChave.set(item.chave, agoraMs);
       this.#podar(agoraMs);
@@ -386,7 +594,16 @@ export class NarracaoDeAmbiente {
     // "se aproximando" e "passando" são acontecimentos: merecem frase própria,
     // na hora. Só a lista de novidades é que vira frase única.
     const acontecimento = livres.find((c) => c.tipo !== "apareceu");
-    if (acontecimento) return { texto: acontecimento.text, eventos: [acontecimento] };
+    if (acontecimento) {
+      return {
+        texto: acontecimento.text, eventos: [acontecimento],
+        // "Carro passando à direita" dito nove vezes numa quadra é a mesma
+        // notícia nove vezes: a família leva isso à habituação.
+        familia: acontecimento.familia ?? null,
+        plural: acontecimento.plural ?? null,
+        direcao: acontecimento.direcao ?? null,
+      };
+    }
 
     const novidades = livres.filter((c) => c.tipo === "apareceu").slice(0, this.maxNovidades);
     if (novidades.length === 0) return null;
@@ -408,10 +625,12 @@ export class NarracaoDeAmbiente {
       const n = novidades[0];
       const o = achar(n.alvo);
       const nome = o && NOMES[o.detection.label];
-      if (!nome) return { texto: n.text, eventos: [n] };
+      const fam = { familia: n.familia ?? null, plural: n.plural ?? null, direcao: n.direcao ?? null };
+      if (!nome) return { texto: n.text, eventos: [n], ...fam };
       return {
         texto: this.fraseador.objeto(n.alvo, nome.singular, o.direction, metrosFalado(o.distanceM)),
         eventos: [n],
+        ...fam,
       };
     }
 

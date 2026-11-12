@@ -88,3 +88,50 @@ test("encerrar não atropela o pedido de ir a algum lugar", () => {
   assert.equal(c.acao, Acao.IR);
   assert.equal(c.destino, "padaria");
 });
+
+// ------------------------------------------------------------
+// Barreira de calçada pela voz
+// ------------------------------------------------------------
+// Uma pessoa cega parada numa calçada quebrada não vai procurar um botão na
+// tela para relatar o que acabou de acontecer com ela. Ou o relato cabe numa
+// frase dita de pé, no meio da rua, ou ele não existe — e sem relato de
+// dificuldade a detecção não vira denúncia.
+
+test("a frase natural carrega a dificuldade, sem a pessoa ter de escolher opção", () => {
+  const casos = {
+    "eu caí": "cai",
+    "tropecei na calçada": "tropecei",
+    "tive que descer para a rua": "fui_para_rua",
+    "não consegui passar": "nao_passei",
+    "pedi ajuda": "pedi_ajuda",
+    "tive que desviar": "desviei",
+  };
+  for (const [frase, esperada] of Object.entries(casos)) {
+    const c = interpretarComando(frase);
+    assert.equal(c.acao, Acao.ANOTAR_BARREIRA, `"${frase}" não virou registro de barreira`);
+    assert.equal(c.dificuldade, esperada, `"${frase}" com dificuldade errada`);
+  }
+});
+
+test("dá para registrar sem dizer o que aconteceu", () => {
+  for (const f of ["anota essa barreira", "registra essa calçada", "a calçada está horrível"]) {
+    const c = interpretarComando(f);
+    assert.equal(c.acao, Acao.ANOTAR_BARREIRA, `"${f}"`);
+    assert.equal(c.dificuldade, null, "sem relato, a dificuldade fica em aberto");
+  }
+});
+
+test("SOCORRO continua vencendo o registro de barreira", () => {
+  // A ordem das regras é uma decisão de segurança: "me ajuda" é emergência,
+  // não relato de calçada. Trocar a ordem aqui mata gente.
+  assert.equal(acao("socorro"), Acao.SOCORRO);
+  assert.equal(acao("me ajuda"), Acao.SOCORRO);
+  assert.equal(acao("preciso de ajuda"), Acao.SOCORRO);
+});
+
+test("registrar barreira não engole os comandos de sempre", () => {
+  assert.equal(acao("onde estou"), Acao.ONDE_ESTOU);
+  assert.equal(acao("o que tem aqui"), Acao.DESCREVER);
+  assert.equal(acao("leia isso"), Acao.LER);
+  assert.equal(acao("pode parar"), Acao.ENCERRAR);
+});

@@ -9,9 +9,16 @@ import {
   Narrador, Verbosidade, associarCortantes, registrarClasses, numero,
 } from "./core.js";
 import { amostrarSemaforo, Segmentador } from "./vision.js";
+import { EstabilizadorEspacial, confirmados } from "./estavel.js";
+import {
+  RegistroDeBarreiras, TipoBarreira, DIFICULDADE_FALADA, pacoteDeDenuncia,
+} from "./barreiras.js";
 import { Leitor } from "./ocr.js";
 import { Diario, TipoErro } from "./diario.js";
-import { Canal, FilaDeFala, Fraseador, EstadoDaCena, NarracaoDeAmbiente } from "./fala.js";
+import {
+  Canal, FilaDeFala, Fraseador, EstadoDaCena, NarracaoDeAmbiente,
+  ModoVoz, politicaDeVoz,
+} from "./fala.js";
 import { Navegador, referenciaNoLado, distanciaFalada, cardeal, distanciaM } from "./navegacao.js";
 import { Orientacao, caminhoAFrente, soAVia } from "./orientar.js";
 import { tracarRota } from "./rotas.js";
@@ -67,6 +74,7 @@ const falaEl = $("fala");
 const metricsEl = $("metrics");
 const pisoEl = $("piso");
 const liveEl = $("live");
+const liveUrgenteEl = $("liveUrgente");
 const dlgAjustes = $("ajustes");
 
 let state = "parado"; // parado | carregando | ativo
@@ -89,11 +97,41 @@ const ultimoAvisoPiso = new Map();
 
 const alerts = new AlertEngine();
 const motion = new MotionTracker();
+const estabilizador = new EstabilizadorEspacial();
 const orientacao = new Orientacao();
 const narrador = new Narrador();
 const segmentador = new Segmentador();
 const leitor = new Leitor();
 const diario = new Diario();
+
+// ---------------- Caixa-preta ----------------
+// Quem está validando o app não enxerga a tela, não abre o console do
+// navegador e não tem como tirar print. Quando alguma coisa quebra, o relato
+// possível é "parou" ou "travou" — e, até aqui, era tudo o que sobrava, porque
+// nenhum erro fora dos try/catch pontuais era registrado em lugar nenhum.
+//
+// Estes dois ouvintes são a caixa-preta: todo erro não tratado e toda promessa
+// rejeitada sem dono entram no diário da sessão, com a etapa em que o app
+// estava. Não consertam nada — fazem a falha deixar rastro, que é a diferença
+// entre um defeito investigável e um defeito eterno.
+const ULTIMOS_ERROS = [];
+function anotarFalhaGlobal(onde, erro) {
+  const linha = {
+    quando: new Date().toISOString(),
+    onde,
+    mensagem: String(erro?.message ?? erro),
+    pilha: String(erro?.stack ?? "").split("\n").slice(0, 4).join(" | "),
+    estado: typeof state === "string" ? state : "?",
+  };
+  ULTIMOS_ERROS.push(linha);
+  if (ULTIMOS_ERROS.length > 20) ULTIMOS_ERROS.shift();
+  try { diario.falha(onde, erro); } catch { /* o diário não pode derrubar o registro de queda */ }
+  try { localStorage.setItem("iris.ultimoerro.v1", JSON.stringify(linha)); } catch { /* cota */ }
+  console.error(`[Íris] ${onde}`, erro);
+}
+
+window.addEventListener("error", (e) => anotarFalhaGlobal("erro_global", e.error ?? e.message));
+window.addEventListener("unhandledrejection", (e) => anotarFalhaGlobal("promessa_rejeitada", e.reason));
 
 // A fila é a única porta de saída da voz. Antes, alerta, narração e descrição
 // chamavam speak() direto e brigavam entre si; agora cada um oferece a sua
@@ -173,6 +211,10 @@ const prefs = Object.assign(
     piso: false, validando: false, verbosidade: Verbosidade.NORMAL, modelo: "lite0",
     aberto: false, chaveGoogle: "", nuvemLigada: false, endpointNuvem: "/api/descrever",
     contatoSocorro: "", socorroModo: "contato",
+    // Nasce em IRIS porque é o único valor com que o app funciona para quem
+    // NÃO usa leitor de tela. Quem usa troca em dois toques, e o app diz isso
+    // em voz alta na primeira sessão.
+    modoVoz: ModoVoz.IRIS,
   },
   (() => { try { return JSON.parse(localStorage.getItem(PREFS) ?? "{}"); } catch { return {}; } })()
 );
@@ -194,6 +236,12 @@ const MARCA = "iris.sessao.v1";
 /** Quanta memória o aparelho declara. Chrome responde; Safari não. */
 const MEMORIA_GB = navigator.deviceMemory ?? null;
 const MEMORIA_MIN_ABERTO = 4;   // abaixo disso o OWL-ViT derruba a aba
+// O aviso de calçada é o SEGUNDO modelo mais caro do app (~120 MB com as
+// ativações), e era o único dos pesados que não tinha porteira nenhuma: o
+// ampliado recusava aparelho pequeno e explicava por quê; a calçada aceitava
+// e caía. Três gigabytes é o piso em que o SegFormer conviveu com o detector
+// sem derrubar a aba nos aparelhos que testamos.
+const MEMORIA_MIN_PISO = 3;
 
 function marcarAtivo(etapa) {
   try {
@@ -360,9 +408,16 @@ function bombearFala() {
   const ocupada = Boolean(s?.speaking || s?.pending);
   const saida = fila.proxima(performance.now(), ocupada);
   if (!saida) return;
-  speak(saida.texto, saida.interromper);
+
+  // QUEM DIZ ESTA FRASE. Antes, toda frase saía pela voz do Íris E ia para uma
+  // região `aria-live="assertive"`, que o leitor de tela lê — ou seja, duas
+  // vezes, e interrompendo o que a pessoa estava ouvindo. Agora cada frase tem
+  // um dono. Ver politicaDeVoz(), em fala.js.
+  const p = politicaDeVoz(saida.canal, prefs.modoVoz, { urgente: saida.item?.urgente === true });
+  if (p.voz) speak(saida.texto, saida.interromper);
   if (saida.canal !== Canal.NARRACAO) ultimaFalaImportante = saida.texto;
-  mostrar(saida.texto, NIVEL_DO_CANAL[saida.canal] ?? "info");
+  mostrar(saida.texto, NIVEL_DO_CANAL[saida.canal] ?? "info", "",
+    { viva: p.tela, assertivo: p.assertivo });
 }
 
 // A navegação fala mesmo com a câmera desligada, então a fila não pode
@@ -386,12 +441,25 @@ function testarVoz() {
   }, 1600);
 }
 
-/** Barra de fala: mostra na tela o que o app acabou de dizer. */
-function mostrar(texto, nivel = "info", detalhe = "") {
+/**
+ * Barra de fala: mostra na tela o que o app acabou de dizer.
+ *
+ * `viva` decide se o texto também vai para a região que o leitor de tela lê.
+ * O padrão é NÃO ir: no modo Íris a voz do app já disse, e mandar para a
+ * região viva faria o leitor de tela repetir tudo. A barra de status continua
+ * na tela de qualquer jeito — ela é para quem tem baixa visão, não para quem
+ * usa leitor.
+ */
+function mostrar(texto, nivel = "info", detalhe = "", { viva = false, assertivo = false } = {}) {
   statusEl.textContent = texto;
   extraEl.textContent = detalhe;
   falaEl.dataset.nivel = nivel;
-  liveEl.textContent = texto;
+  if (!viva) return;
+  const alvo = assertivo ? liveUrgenteEl : liveEl;
+  // Texto idêntico ao anterior não dispara o leitor de tela em alguns
+  // navegadores: limpar antes garante o anúncio.
+  alvo.textContent = "";
+  alvo.textContent = texto;
 }
 
 // ------------- Bipe / vibração -------------
@@ -429,8 +497,14 @@ function setState(next, message, nivel = "info") {
   btnToggle.dataset.active = String(active);
   rotuloPrincipal.textContent = active ? "Parar" : "Iniciar";
   btnToggle.setAttribute("aria-label", active ? "Parar percepção" : "Iniciar percepção");
-  btnDescrever.disabled = next !== "ativo";
-  btnLerTexto.disabled = next !== "ativo";
+  // `aria-disabled` em vez de `disabled`: o leitor de tela pula o que está
+  // desabilitado, e com isso uma pessoa cega nunca descobria que estes dois
+  // botões existem. Ver o comentário em index.html.
+  const indisponivel = next !== "ativo";
+  for (const b of [btnDescrever, btnLerTexto]) {
+    b.setAttribute("aria-disabled", String(indisponivel));
+    b.classList.toggle("inativo", indisponivel);
+  }
   mostrar(message, nivel);
 }
 
@@ -489,6 +563,7 @@ async function start() {
 
   alerts.reset();
   motion.reset();
+  estabilizador.reset();
   ambiente.reset();
   orientacao.reset();
   orientacao.iniciar(performance.now());
@@ -521,13 +596,35 @@ async function start() {
   if (!rastreador.ativo) gpsDaCamera = rastreador.iniciar();
   avaliador.reset();
 
-  if (prefs.piso) iniciarPiso();
+  if (prefs.piso) iniciarPiso().catch((e) => diario.falha("iniciar_piso", e));
 }
 
-/** A segmentação é opcional e pesada: carrega depois, sem travar a detecção. */
+/**
+ * A segmentação é opcional e pesada: carrega depois, sem travar a detecção.
+ *
+ * Tudo aqui dentro existe porque ligar o aviso de calçada era o caminho mais
+ * curto para o app parar de responder. A carga demora segundos; nesse
+ * intervalo o usuário pode desmarcar a opção, parar a percepção, ou marcar de
+ * novo. Sem as checagens DEPOIS do await, o app acabava com o laço ligado sem
+ * ninguém ter pedido, e com o modelo ocupando memória para nada.
+ */
 async function iniciarPiso() {
+  // Porteira antes do download: recusar agora é melhor do que cair depois,
+  // e a pessoa fica sabendo o motivo em voz alta — ela não lê a tela.
+  if (!memoriaBastaParaPiso()) {
+    prefs.piso = false;
+    salvarPrefs();
+    if (chkPiso) chkPiso.checked = false;
+    pisoEl.textContent = "";
+    dizer(`Este aparelho declara ${MEMORIA_GB} gigabytes de memória, e o aviso de calçada `
+      + `precisa de pelo menos ${MEMORIA_MIN_PISO}. Mantive desligado para o aplicativo não cair.`,
+      Canal.SISTEMA, { interrompe: true });
+    return;
+  }
+
   if (!segmentador.pronto) {
     pisoEl.textContent = "Preparando piso…";
+    marcarAtivo("carregando_piso");   // se a aba morrer aqui, a próxima abertura sabe por quê
     try {
       await segmentador.carregar();
     } catch (e) {
@@ -535,26 +632,77 @@ async function iniciarPiso() {
       diario.falha("carregar_piso", e);
       pisoEl.textContent = "Piso indisponível";
       marcarAtivo("deteccao");
+      // Falhou a carga: desligar a preferência evita repetir o download a
+      // cada sessão e deixar a pessoa achando que a calçada está sendo vista.
+      prefs.piso = false;
+      salvarPrefs();
+      if (chkPiso) chkPiso.checked = false;
+      dizer("Não consegui preparar o aviso de calçada. Desliguei a opção; o resto do "
+        + "aplicativo continua funcionando.", Canal.SISTEMA, { interrompe: true });
       return;
     }
   }
-  if (state !== "ativo") return;
+
+  // Desmarcou durante a carga, ou parou a percepção: não ligamos o laço, e
+  // devolvemos a memória em vez de guardar um modelo que ninguém pediu.
+  if (!prefs.piso || state !== "ativo") {
+    if (!prefs.piso) segmentador.descarregar();
+    pisoEl.textContent = "";
+    marcarAtivo("deteccao");
+    return;
+  }
+
   pisoEl.textContent = "";
+  marcarAtivo("piso");
+  clearInterval(segTimer);
+  segTimer = setInterval(lacoPiso, segIntervaloAtual);
+}
+
+/**
+ * Desliga o aviso de calçada E devolve a memória.
+ *
+ * Antes, desmarcar a opção só parava o laço: o SegFormer continuava carregado
+ * pelo resto da sessão. Quem desligasse a calçada para ligar o reconhecimento
+ * ampliado — que é exatamente o que o app manda fazer, porque os dois não
+ * cabem juntos — ficava com os dois na memória assim mesmo.
+ */
+function desligarPiso() {
+  clearInterval(segTimer);
+  segTimer = 0;
+  segIntervaloAtual = SEG_INTERVALO_MS;
+  pisoEl.textContent = "";
+  pisoEl.classList.remove("perigo", "calma");
+  pisoAtual = null;
+  pisoAnterior = null;
+  ultimoAvisoPiso.clear();
+  segmentador.descarregar();
+}
+
+/** Espaça o laço do piso e devolve o novo intervalo. */
+function espacarPiso(ms) {
+  const novo = Math.min(3000, Math.max(segIntervaloAtual, Math.round(ms)));
+  if (novo === segIntervaloAtual) return;
+  segIntervaloAtual = novo;
   clearInterval(segTimer);
   segTimer = setInterval(lacoPiso, segIntervaloAtual);
 }
 
 async function lacoPiso() {
   if (state !== "ativo" || !prefs.piso) return;
+
+  // Análise descartada porque a anterior ainda roda. Isto acontece em cadeia
+  // num aparelho lento, e a versão anterior NÃO desacelerava nesse caso: a
+  // regra de espaçamento só olhava para análises concluídas. O resultado era
+  // um temporizador batendo na porta a cada dois segundos para ser mandado
+  // embora, somando trabalho de canvas e coleta de lixo justamente no
+  // aparelho que já não dava conta.
+  if (segmentador.ocupado) { espacarPiso(segIntervaloAtual * 1.5); return; }
+
   const r = await segmentador.analisar(video);
   if (!r || state !== "ativo") return;
 
   // aparelho lento: espaça as análises em vez de engasgar
-  if (r.ms > segIntervaloAtual * 0.9 && segIntervaloAtual < 3000) {
-    segIntervaloAtual = Math.min(3000, Math.round(r.ms * 1.4));
-    clearInterval(segTimer);
-    segTimer = setInterval(lacoPiso, segIntervaloAtual);
-  }
+  if (r.ms > segIntervaloAtual * 0.9) espacarPiso(r.ms * 1.4);
 
   const novo = analisarPiso(r.contagens, r.totalPixels);
   if (novo) {
@@ -636,13 +784,33 @@ function stop(announce = true) {
 // ---------------- Laço de detecção ----------------
 const clamp = (v) => Math.min(1, Math.max(0, v));
 
+// O LAÇO NÃO PODE MORRER, E ESTE ERA O JEITO DE MATÁ-LO.
+//
+// `processFrame` já era protegido; `bombearFala()` não era. Uma exceção ali —
+// voz indisponível, `speechSynthesis` em estado estranho depois de a tela
+// apagar, um item de fila malformado — escapava da função ANTES do
+// `requestAnimationFrame` da última linha. O laço simplesmente não se
+// reagendava.
+//
+// O que o usuário vê quando isso acontece é o pior cenário possível: a câmera
+// continua ligada, a imagem continua na tela, o app parece aceso — e não fala
+// mais nada, nunca. Não há erro visível, não há travamento do navegador, e
+// quem não enxerga não tem como perceber que a imagem congelou. Ele continua
+// andando confiando num app que parou de olhar.
+//
+// Agora o reagendamento mora no `finally`: nada do que acontecer dentro do
+// quadro impede o próximo. Uma falha de fala vira um registro no diário e o
+// laço segue.
 function tick(now) {
   if (state !== "ativo") return;
-  if (now - lastFrameAt >= 1000 / MAX_FPS && video.readyState >= 2) {
-    try { processFrame(now); } catch (e) { console.error("Falha no quadro", e); diario.falha("quadro", e); }
+  try {
+    if (now - lastFrameAt >= 1000 / MAX_FPS && video.readyState >= 2) {
+      try { processFrame(now); } catch (e) { console.error("Falha no quadro", e); diario.falha("quadro", e); }
+    }
+    try { bombearFala(); } catch (e) { console.error("Falha na fala", e); diario.falha("bombear_fala", e); }
+  } finally {
+    if (state === "ativo") rafId = requestAnimationFrame(tick);
   }
-  bombearFala();
-  rafId = requestAnimationFrame(tick);
 }
 
 function processFrame(now) {
@@ -679,6 +847,13 @@ function processFrame(now) {
     : detections;
 
   let objects = analyzeSpatial(comAberto);
+  // ESTABILIZAR ANTES DE QUALQUER DECISÃO. `analyzeSpatial` não tem memória:
+  // direção e faixa de distância saem de limites secos, e um objeto parado em
+  // cima de um desses limites alterna de estado várias vezes por segundo. Era
+  // a origem do alerta intermitente, que não só cansa — destrói a precisão da
+  // direção, que é o dado com que a pessoa desvia. Daqui para baixo, todo o
+  // resto do app trabalha com objetos que têm identidade e não piscam.
+  objects = estabilizador.update(objects, ts);
   // A velocidade do GPS é o que permite ao app saber que o carro não está
   // vindo: sou eu que estou andando até ele. Sem GPS o MotionTracker se vira
   // com os objetos imóveis da cena.
@@ -697,7 +872,14 @@ function processFrame(now) {
 
   // A cena é observada em todo quadro, inclusive nos que viram alerta: é
   // assim que o app sabe quando a cena voltou a ficar parada.
-  const mudanca = ambiente.observar(objects, ts);
+  //
+  // Só o que está CONFIRMADO entra aqui e na narração. O alerta tem contador
+  // próprio e continua vendo tudo — ele é o canal em que atrasar custa caro.
+  // Já a narração e a descrição anunciavam objeto de um quadro só, que é
+  // quase sempre erro de detector: é assim que uma calçada vazia vira "urso
+  // à frente".
+  const estaveis = confirmados(objects);
+  const mudanca = ambiente.observar(estaveis, ts);
 
   // Ameaças antes do alerta comum: elas olham trajetória e tempo até o
   // impacto, e quando falam o alerta comum cala sobre o mesmo objeto.
@@ -710,18 +892,25 @@ function processFrame(now) {
     const high = alert.priority === Priority.ALTA;
     // O bipe só acompanha uma fala que vai mesmo sair. Bipar sem falar deixa a
     // pessoa parada procurando um aviso que nunca veio.
-    if (dizer(alert.text, Canal.ALERTA, { chave: alert.key, urgente: high })) {
+    // `familia` liga a habituação: ver a classe Habituacao em fala.js. É o que
+    // impede trinta parquímetros diferentes ao longo de uma quadra de virarem
+    // trinta vezes a mesma frase. Alerta urgente nunca se habitua.
+    if (dizer(alert.text, Canal.ALERTA, {
+      chave: alert.key, urgente: high,
+      familia: alert.familia, plural: alert.plural, direcao: alert.direcao,
+      semHabituacao: alert.semHabituacao,
+    })) {
       signal(high);
       fila.calarAbaixoDe(Canal.ALERTA);   // o que ia ser dito agora virou ruído
       diario.alerta(alert);
       barramento.publicar(Evento.ALERTA, { texto: alert.text, prioridade: alert.priority });
     }
   } else if (describeLeft === 0 && !lendoTexto) {
-    narrarAmbiente(objects, ts, mudanca);
+    narrarAmbiente(estaveis, ts, mudanca);
   }
 
   if (describeLeft > 0) {
-    describeBuffer.push(objects);
+    describeBuffer.push(estaveis);
     describeLeft--;
     if (describeLeft === 0) {
       const quadros = describeBuffer;
@@ -758,7 +947,10 @@ function narrarAmbiente(objects, ts, mudanca) {
   if (!fala) return;
   // Confirmamos só depois de a fila aceitar: uma frase recusada tem de poder
   // voltar a ser novidade, senão o objeto nasce calado para sempre.
-  if (dizer(fala.texto, Canal.NARRACAO, { chave: fala.eventos.map((e) => e.chave).join("+") })) {
+  if (dizer(fala.texto, Canal.NARRACAO, {
+    chave: fala.eventos.map((e) => e.chave).join("+"),
+    familia: fala.familia, plural: fala.plural, direcao: fala.direcao,
+  })) {
     ambiente.confirmar(fala.eventos, ts);
     diario.alerta({ text: fala.texto, tipo: "ambiente", priority: Priority.BAIXA });
   }
@@ -907,6 +1099,12 @@ function memoriaBastaParaAberto() {
   return MEMORIA_GB >= MEMORIA_MIN_ABERTO;
 }
 
+/** E o modelo de calçada? */
+function memoriaBastaParaPiso() {
+  if (MEMORIA_GB === null) return true;      // Safari não declara: deixamos tentar
+  return MEMORIA_GB >= MEMORIA_MIN_PISO;
+}
+
 async function varrerVocabularioAberto({ descricao = false } = {}) {
   if (!prefs.aberto || state !== "ativo") return null;
   if (!memoriaBastaParaAberto()) {
@@ -950,6 +1148,11 @@ async function varrerVocabularioAberto({ descricao = false } = {}) {
       barramento.publicar(Evento.RISCO_ABERTO, registroDeRisco({
         classe: d.pt, confianca: d.score, posicao: pos, metros: null,
       }));
+      // E vira registro de barreira, com local e data. Fica no aparelho: o
+      // envio é outra decisão, com outro consentimento. O que ainda falta a
+      // este registro é a dificuldade que a barreira causou — ela só a pessoa
+      // sabe, e ela entra pela voz ("tive que descer para a rua").
+      anotarBarreira({ classe: d.pt, confianca: d.score, posicao: pos, automatico: true });
     }
 
     if (!descricao || r.deteccoes.length === 0) return null;
@@ -1284,6 +1487,121 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state === "ativo" && !wakeLock) requestWakeLock();
 });
 
+// ---------------- Barreiras de calçada ----------------
+//
+// O que o Íris percebe deixa de morrer na sessão. Cada buraco, bueiro aberto,
+// tapume ou degrau vira um registro com local e data — e, quando a pessoa
+// conta o que aconteceu com ela, vira denúncia.
+//
+// NADA SAI DO APARELHO AQUI. O registro mora no localStorage e só vai embora
+// se a pessoa tocar em exportar. É a mesma regra do diário do piloto e da
+// descrição na nuvem: o app não publica a vida de ninguém por iniciativa
+// própria.
+
+const CHAVE_BARREIRAS = "iris.barreiras.v1";
+
+const barreiras = (() => {
+  try { return RegistroDeBarreiras.carregar(JSON.parse(localStorage.getItem(CHAVE_BARREIRAS) ?? "null")); }
+  catch { return new RegistroDeBarreiras(); }
+})();
+
+function salvarBarreiras() {
+  try { localStorage.setItem(CHAVE_BARREIRAS, JSON.stringify(barreiras.serializar())); }
+  catch { /* cota cheia: o registro é melhor-esforço, nunca derruba o app */ }
+}
+
+/** A última barreira anotada, para a pessoa poder completar o relato depois. */
+let ultimaBarreira = null;
+const JANELA_RELATO_MS = 120000;   // dois minutos para dizer o que aconteceu
+let ultimaBarreiraMs = 0;
+
+function anotarBarreira({ classe = null, tipo = null, confianca = null, posicao = null,
+                          dificuldade = null, nota = null, automatico = false } = {}) {
+  const o = barreiras.anotar({
+    classe, tipo, confianca,
+    posicao: posicao ?? rastreador.ultima,
+    endereco: viaAtual,
+    dificuldade, nota,
+    quando: new Date().toISOString(),
+  });
+  if (!o) return null;
+  ultimaBarreira = o;
+  ultimaBarreiraMs = performance.now();
+  salvarBarreiras();
+  if (!automatico) atualizarResumoBarreiras();
+  return o;
+}
+
+/**
+ * A pessoa disse o que aconteceu com ela.
+ *
+ * Se o app acabou de detectar uma barreira, o relato COMPLETA aquele registro
+ * em vez de criar outro — senão o mesmo buraco viraria dois casos, um do
+ * sensor e um da pessoa, e a recorrência ficaria inflada justamente no número
+ * que move a fiscalização.
+ */
+function relatarBarreira(dificuldade, texto) {
+  const recente = ultimaBarreira && performance.now() - ultimaBarreiraMs < JANELA_RELATO_MS;
+  if (recente) {
+    ultimaBarreira.dificuldade = dificuldade ?? ultimaBarreira.dificuldade;
+    if (texto) ultimaBarreira.nota = texto;
+    salvarBarreiras();
+  } else {
+    // Sem detecção recente, o relato vale sozinho. O tipo fica como
+    // infraestrutura degradada, que é o mais comum, e a nota guarda as
+    // palavras da pessoa — que valem mais do que a nossa classificação.
+    anotarBarreira({
+      tipo: TipoBarreira.INFRA_DEGRADADA, dificuldade, nota: texto ?? null,
+    });
+  }
+  atualizarResumoBarreiras();
+
+  const comoFoi = dificuldade ? DIFICULDADE_FALADA[dificuldade] : null;
+  const onde = viaAtual ? ` na ${viaAtual}` : "";
+  dizer(comoFoi
+    ? `Anotei${onde}: ${comoFoi}. Isso entra no relatório de denúncias.`
+    : `Anotei a barreira${onde}. Se quiser, me diga o que aconteceu: tropecei, `
+      + "tive que descer para a rua, não consegui passar.",
+    Canal.SISTEMA, { interrompe: true });
+  signal(false);
+}
+
+function atualizarResumoBarreiras() {
+  const el = $("resumoBarreiras");
+  if (!el) return;
+  const r = barreiras.relatorio();
+  el.textContent = r.totalOcorrencias === 0
+    ? "Nenhuma barreira registrada ainda."
+    : `${r.totalOcorrencias} registro(s) em ${r.totalLocais} local(is). `
+      + `Com relato de dificuldade: ${barreiras.ocorrencias.filter((o) => o.dificuldade).length}.`;
+}
+
+/** Gera o arquivo de denúncias. Só acontece a pedido. */
+function exportarBarreiras() {
+  const r = barreiras.relatorio();
+  if (r.totalOcorrencias === 0) {
+    dizer("Ainda não há barreira registrada para exportar.", Canal.SISTEMA, { interrompe: true });
+    return;
+  }
+  const pacote = pacoteDeDenuncia(barreiras, { gerado: new Date().toISOString() });
+  baixarJson(pacote, `iris-denuncias-${new Date().toISOString().slice(0, 10)}.json`);
+  dizer(`Exportei ${r.totalLocais} caso(s), com ${r.totalOcorrencias} registro(s). `
+    + "O arquivo ficou nos seus downloads. Nenhuma imagem foi incluída.",
+    Canal.SISTEMA, { interrompe: true });
+}
+
+function baixarJson(obj, nome) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = nome;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // ---------------- Validação do piloto ----------------
 function contexto() {
   return {
@@ -1325,8 +1643,26 @@ btnToggle.addEventListener("click", () => {
   }
   return state === "parado" ? start() : stop();
 });
-btnDescrever.addEventListener("click", describe);
-btnLerTexto.addEventListener("click", lerTexto);
+// Com `aria-disabled` o clique ainda chega: quem toca precisa ouvir POR QUE o
+// botão não vale agora, em vez de tocar num botão que não faz nada. Para quem
+// não enxerga, botão mudo é indistinguível de app travado.
+function seDisponivel(botao, acao, motivo) {
+  return (e) => {
+    if (botao.getAttribute("aria-disabled") === "true") {
+      e.preventDefault();
+      speak(motivo, true);
+      return;
+    }
+    acao();
+  };
+}
+
+btnDescrever.addEventListener("click",
+  seDisponivel(btnDescrever, describe,
+    "Para descrever o que está à frente, toque antes em Iniciar, no botão do meio."));
+btnLerTexto.addEventListener("click",
+  seDisponivel(btnLerTexto, lerTexto,
+    "Para ler um texto, toque antes em Iniciar, no botão do meio."));
 $("errou").addEventListener("click", () => relatar(TipoErro.FALSO_POSITIVO, "Aviso errado marcado."));
 $("perdeu").addEventListener("click", () => relatar(TipoErro.NAO_AVISOU, "Obstáculo não avisado, marcado."));
 
@@ -1477,13 +1813,30 @@ function marcarConversa(estado) {
   if (!b) return;
   b.dataset.estado = estado;
   b.dataset.ouvindo = String(estado === ESTADO_CONVERSA.OUVINDO);
-  $("rotuloPerguntar").textContent =
-    estado === ESTADO_CONVERSA.OUVINDO ? "Ouvindo… fale agora"
-      : estado === ESTADO_CONVERSA.PENSANDO ? "Um instante…"
-        : "Conversar";
-  b.setAttribute("aria-label", estado === ESTADO_CONVERSA.PARADA
-    ? "Conversar com o Íris. Toque e fale."
-    : "Conversando. Toque para encerrar a conversa.");
+  const rotulos = {
+    [ESTADO_CONVERSA.OUVINDO]: "Ouvindo… fale agora",
+    [ESTADO_CONVERSA.PENSANDO]: "Um instante…",
+    [ESTADO_CONVERSA.PARADA]: "Conversar",
+  };
+  // UM RÓTULO POR ESTADO, e não um por "parada / não parada". O `aria-label`
+  // anterior tinha dois valores para três estados: ouvindo e pensando davam
+  // exatamente o mesmo anúncio, e quem não enxerga ficava sem saber se o app
+  // ainda estava ouvindo ou já tinha parado de ouvir — que é a única coisa que
+  // importa saber na hora de falar.
+  const nomes = {
+    [ESTADO_CONVERSA.OUVINDO]: "Ouvindo. Fale agora. Toque para encerrar a conversa.",
+    [ESTADO_CONVERSA.PENSANDO]: "Um instante, preparando a resposta. Toque para encerrar a conversa.",
+    [ESTADO_CONVERSA.PARADA]: "Conversar com o Íris. Toque e fale.",
+  };
+  $("rotuloPerguntar").textContent = rotulos[estado] ?? "Conversar";
+  b.setAttribute("aria-label", nomes[estado] ?? nomes[ESTADO_CONVERSA.PARADA]);
+
+  // A transição vai para a região viva educada: é o mecanismo confiável para
+  // anunciar mudança de estado, e não depende de o foco estar no botão.
+  if (estado !== ESTADO_CONVERSA.PARADA) {
+    liveEl.textContent = "";
+    liveEl.textContent = rotulos[estado];
+  }
 }
 
 /**
@@ -1600,6 +1953,10 @@ async function executarComando(c) {
 
   switch (c.acao) {
     case Acao.SOCORRO: return pedirSocorro();
+    // "Eu caí", "tive que descer para a rua", "anota essa barreira". É o único
+    // caminho possível para quem não enxerga relatar de pé, no meio da
+    // calçada — e é o relato, não a detecção, que faz a denúncia valer.
+    case Acao.ANOTAR_BARREIRA: return relatarBarreira(c.dificuldade, c.texto);
     case Acao.ONDE_ESTOU: return ondeEstou();
     case Acao.DESCREVER:
       if (state !== "ativo") { falar("Toque em Iniciar para eu ligar a câmera, e pergunte de novo."); return; }
@@ -1819,8 +2176,28 @@ chkValidando.checked = prefs.validando;
 document.body.dataset.validando = String(prefs.validando);
 
 chkPiso.addEventListener("change", () => {
-  prefs.piso = chkPiso.checked;
-  if (prefs.piso && prefs.aberto) {
+  if (!chkPiso.checked) {
+    prefs.piso = false;
+    salvarPrefs();
+    desligarPiso();
+    speak("Aviso de calçada desligado.", true);
+    return;
+  }
+
+  // A recusa por memória sai AQUI, no toque, e não só quando a percepção
+  // começa: quem marca a opção parada precisa saber na hora que ela não vai
+  // valer, em vez de descobrir na rua que o app não avisa de degrau.
+  if (!memoriaBastaParaPiso()) {
+    chkPiso.checked = false;
+    prefs.piso = false;
+    salvarPrefs();
+    speak(`Este aparelho declara ${MEMORIA_GB} gigabytes de memória. O aviso de calçada `
+      + `precisa de pelo menos ${MEMORIA_MIN_PISO} e derrubaria o aplicativo. Mantive desligado.`, true);
+    return;
+  }
+
+  prefs.piso = true;
+  if (prefs.aberto) {
     prefs.aberto = false;
     chkAberto.checked = false;
     clearInterval(varreduraTimer); varreduraTimer = 0;
@@ -1829,8 +2206,27 @@ chkPiso.addEventListener("change", () => {
       + "juntos na memória do celular.", true);
   }
   salvarPrefs();
-  if (!prefs.piso) { clearInterval(segTimer); segTimer = 0; pisoEl.textContent = ""; pisoAtual = null; }
-  else if (state === "ativo") iniciarPiso();
+  // `iniciarPiso` é assíncrona e baixa modelo: sem o catch, uma falha de rede
+  // vira promessa rejeitada sem dono — some do console e não entra no diário.
+  if (state === "ativo") iniciarPiso().catch((e) => diario.falha("iniciar_piso", e));
+});
+
+// ---------------- Quem fala ----------------
+const selModoVoz = $("selModoVoz");
+selModoVoz.value = prefs.modoVoz;
+selModoVoz.addEventListener("change", () => {
+  prefs.modoVoz = selModoVoz.value;
+  salvarPrefs();
+  // A confirmação sai SEMPRE pela voz do Íris, mesmo quando a escolha foi
+  // "meu leitor de tela": é a única forma de a pessoa ter certeza de que a
+  // troca valeu, sem depender do canal que ela acabou de escolher.
+  const frases = {
+    [ModoVoz.IRIS]: "A voz do Íris vai dizer tudo.",
+    [ModoVoz.LEITOR]: "Seu leitor de tela passa a dizer os avisos comuns. "
+      + "O Íris continua falando obstáculo e manobra com a voz dele.",
+    [ModoVoz.AMBOS]: "Os dois vão falar. Você vai ouvir cada aviso duas vezes.",
+  };
+  speak(frases[prefs.modoVoz] ?? "", true);
 });
 
 const selVerbosidade = $("selVerbosidade");
@@ -1910,8 +2306,7 @@ chkAberto.addEventListener("change", () => {
   if (prefs.piso) {
     prefs.piso = false;
     chkPiso.checked = false;
-    clearInterval(segTimer); segTimer = 0;
-    pisoEl.textContent = ""; pisoAtual = null;
+    desligarPiso();   // devolve os ~120 MB; antes o modelo ficava carregado
     avisoPiso = " Desliguei o aviso de calçada, porque os dois juntos não cabem na memória do celular.";
   }
 
@@ -1974,6 +2369,31 @@ $("limparDiario").addEventListener("click", () => {
 
 atualizarResumo();
 
+// ---------------- Barreiras: exportar e apagar ----------------
+$("exportarBarreiras").addEventListener("click", exportarBarreiras);
+
+// Apagar exige confirmação falada. Quem não enxerga não vê a caixa de diálogo
+// do navegador, e `confirm()` nem sempre é anunciado: o segundo toque, dentro
+// da janela, é a confirmação. Mesmo padrão do consentimento da nuvem.
+let apagarBarreirasAte = 0;
+$("limparBarreiras").addEventListener("click", () => {
+  const agora = performance.now();
+  if (agora > apagarBarreirasAte) {
+    apagarBarreirasAte = agora + 8000;
+    speak(`Isso apaga ${barreiras.ocorrencias.length} registro(s) de barreira, sem voltar atrás. `
+      + "Toque de novo para confirmar.", true);
+    return;
+  }
+  apagarBarreirasAte = 0;
+  barreiras.limpar();
+  ultimaBarreira = null;
+  salvarBarreiras();
+  atualizarResumoBarreiras();
+  speak("Barreiras apagadas.", true);
+});
+
+atualizarResumoBarreiras();
+
 // ---------------- Diagnóstico de memória ----------------
 // A queda por memória é invisível para quem está testando: a aba some e volta
 // uma página de erro do navegador. Esta linha, nos ajustes, é o que permite ao
@@ -1990,6 +2410,16 @@ function atualizarDiagMemoria() {
   if (marcaAnterior) {
     partes.push(`A sessão anterior foi encerrada pelo navegador durante `
       + `"${marcaAnterior.etapa}" — quase sempre falta de memória.`);
+  }
+  // Nem toda parada é falta de memória. Um erro de programação deixa o app
+  // aceso e mudo, e sem esta linha o relato possível era "travou".
+  if (ULTIMOS_ERROS.length) {
+    const u = ULTIMOS_ERROS[ULTIMOS_ERROS.length - 1];
+    partes.push(`${ULTIMOS_ERROS.length} erro(s) nesta sessão. Último, em "${u.onde}": ${u.mensagem}`);
+  } else {
+    let anterior = null;
+    try { anterior = JSON.parse(localStorage.getItem("iris.ultimoerro.v1") ?? "null"); } catch { /* nada */ }
+    if (anterior) partes.push(`Último erro registrado (sessão anterior), em "${anterior.onde}": ${anterior.mensagem}`);
   }
   $("diagMemoria").textContent = partes.join(" ");
 }

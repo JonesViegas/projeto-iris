@@ -216,16 +216,48 @@ export class AlertEngine {
     // A chave do contador NAO pode conter a distancia: ela oscila de quadro a
     // quadro e zeraria o contador toda hora, fazendo o app nunca falar.
     // Contamos por classe e direcao; a distancia entra so na fala.
+    //
+    // QUAL CANDIDATO FICA COM A CHAVE: o MAIS GRAVE, não o primeiro da lista.
+    //
+    // Isto era um defeito de segurança, e o simulador só o revelou quando o
+    // cenário "quadra" passou a posicionar os objetos pela geometria real.
+    // Numa calçada com parquímetros ao longo do meio-fio, os de longe são
+    // lidos como "à frente" — a 20 m, um metro de desvio lateral dá menos de
+    // três graus. Eles chegavam primeiro na lista de detecções e tomavam a
+    // chave `parking meter|à frente`, que é inofensiva: longe, fora do
+    // caminho, prioridade BAIXA.
+    //
+    // Quando um poste PLANTADO NO MEIO DA CALÇADA aparecia, ele gerava a mesma
+    // chave — e era descartado aqui, antes de qualquer decisão. Medido: o
+    // poste no caminho era anunciado normalmente quando estava sozinho na
+    // cena, e NUNCA era anunciado com os outros parquímetros em volta. Um
+    // obstáculo real, no caminho, emudecido por mobiliário urbano da mesma
+    // classe.
+    //
+    // Empate de prioridade fica com o mais próximo, pelo mesmo motivo.
     const byKey = new Map();
     for (const o of objects) {
       const c = this.#candidate(o);
-      if (c && !byKey.has(c.streakKey)) byKey.set(c.streakKey, c);
+      if (!c) continue;
+      const atual = byKey.get(c.streakKey);
+      if (!atual) { byKey.set(c.streakKey, c); continue; }
+      const maisGrave = c.priority < atual.priority;
+      const empateMaisPerto = c.priority === atual.priority
+        && c.prox != null && atual.prox != null && c.prox < atual.prox;
+      if (maisGrave || empateMaisPerto) byKey.set(c.streakKey, c);
     }
     // "pessoa à frente" e "pessoa com objeto pontiagudo à frente" descrevem a
     // mesma cena. O segundo contém o primeiro: falar os dois é ruído na hora
     // em que o usuário mais precisa de uma frase só.
+    //
+    // A comparação é por `chaveClasse` (classe|direção) e não pela chave do
+    // contador, porque esta passou a ser a trilha do estabilizador quando ela
+    // existe — identidade do objeto, não descrição dele.
     for (const c of [...byKey.values()]) {
-      if (c.comPessoa) byKey.delete(`person|${c.direcao}`);
+      if (!c.comPessoa) continue;
+      for (const [k, outro] of byKey) {
+        if (outro !== c && outro.chaveClasse === `person|${c.direcao}`) byKey.delete(k);
+      }
     }
 
     for (const k of [...this.streaks.keys()]) if (!byKey.has(k)) this.streaks.delete(k);
@@ -234,7 +266,9 @@ export class AlertEngine {
     let best = null;
     for (const c of byKey.values()) {
       if (c.priority === Priority.BAIXA) continue;
-      if ((this.silencio.get(c.streakKey.split("|")[0]) ?? -Infinity) > nowMs) continue;
+      // A classe sai de `chaveClasse`: `streakKey` pode ser uma trilha ("t12"),
+      // que não carrega o nome da classe.
+      if ((this.silencio.get((c.chaveClasse ?? c.streakKey).split("|")[0]) ?? -Infinity) > nowMs) continue;
       if ((this.streaks.get(c.streakKey) ?? 0) < this.requiredStreak) continue;
       const last = this.lastSpoken.get(c.key);
       if (last !== undefined && nowMs - last < this.repeatCooldownMs) continue;
@@ -319,7 +353,23 @@ export class AlertEngine {
     // invade o corredor, então a geometria sozinha o chamava de obstáculo no
     // caminho — prioridade ALTA, com direito a insistir a cada seis segundos.
     // Era o "Atenção, carro à direita" de dez em dez passos, a quadra inteira.
-    const passando = o.direction !== Direction.FRENTE && o.afastando === true && !vindo;
+    // MARCAÇÃO CONSTANTE, e não "já começou a se afastar".
+    //
+    // A versão anterior só reconhecia que a pessoa estava passando por um
+    // objeto depois que a distância dele voltava a AUMENTAR — o que, num carro
+    // estacionado, acontece quando ele já ficou para trás. Até lá ele era
+    // "obstáculo perto, no seu caminho", prioridade ALTA, com "Atenção". No
+    // cenário "quadra" do simulador isso rendia onze "Atenção, carro à
+    // direita" e oito "Atenção, parquímetro à esquerda" em noventa segundos de
+    // calçada em que não havia nada a desviar. É a queixa número um de quem
+    // testou o app na rua: o alarme que ensina a ignorar alarme.
+    //
+    // `aoLado` vem de estavel.js e mede a deriva da marcação: o objeto está
+    // escorregando para a borda do quadro, logo você vai passar por ele. Isso
+    // fica evidente segundos antes de a distância aumentar.
+    const passando = o.direction !== Direction.FRENTE
+      && !vindo
+      && (o.aoLado === true || o.afastando === true);
     const noCaminho = o.inPath === true && !passando;
 
     let priority = Priority.BAIXA;
@@ -340,6 +390,7 @@ export class AlertEngine {
         text: p === Priority.ALTA ? `Atenção, ${f}` : cap(f),
         priority: p,
         streakKey: `${label}|${o.direction}`,
+        chaveClasse: `${label}|${o.direction}`,
         key: `${label}|${o.direction}|${o.proximity}|${o.comPessoa ? "p" : ""}`,
         comPessoa: o.comPessoa === true,
         direcao: o.direction,
@@ -368,9 +419,57 @@ export class AlertEngine {
       text, priority, dist, vindo,
       prox: o.proximity,
       noCaminho,
-      sig: `${label}|${o.direction}|${o.cor ?? ""}`,
+      // ENTRAR NO SEU CAMINHO É INFORMAÇÃO NOVA, e `sig` é o campo que carrega
+      // "mudou o sentido disto". Sem `noCaminho` aqui, um objeto anunciado
+      // enquanto ainda estava de lado ficava preso à primeira menção, de
+      // prioridade média, mesmo depois de passar a atravancar o corredor: o
+      // freio de repetição não via novidade nenhuma e segurava o "Atenção".
+      sig: `${label}|${o.direction}|${o.cor ?? ""}|${noCaminho ? "C" : ""}`,
+      // A CHAVE DO ALERTA CONTINUA SENDO A DESCRIÇÃO, E NÃO A IDENTIDADE.
+      //
+      // Houve uma tentativa de trocá-la pela trilha do estabilizador, pensando
+      // em dar ao freio de repetição uma identidade estável. O simulador
+      // derrubou a ideia na hora: no cenário "quadra" as falas subiram de 37
+      // para 60 em noventa segundos. O motivo é óbvio depois de medido — com
+      // identidade própria, cada um dos vinte carros estacionados da quadra
+      // vira um objeto inédito e ganha o direito a um aviso só dele. É
+      // exatamente a descrição cumulativa que o usuário cego pede para não
+      // ouvir: ele não quer saber de vinte carros, quer saber que há carros
+      // estacionados à direita.
+      //
+      // A descrição é o que agrega. E o defeito que a trilha ia resolver — o
+      // mesmo poste anunciado duas vezes, uma "à frente" e outra "à direita" —
+      // já foi resolvido na raiz, pela histerese de `estavel.js`: a direção
+      // não oscila mais, então a chave não troca mais.
       streakKey: `${label}|${o.direction}`,                                  // estavel entre quadros
+      chaveClasse: `${label}|${o.direction}`,
       key: `${label}|${o.direction}|${o.proximity}|${o.cor ?? ""}`,          // governa o repetir
+      // A FAMÍLIA é o que a habituação observa: não este poste, mas "poste à
+      // esquerda, perto" como tipo de notícia. Trinta postes diferentes ao
+      // longo de uma quadra produzem trinta chaves distintas e uma família só.
+      // A FAMÍLIA NÃO CARREGA A FAIXA DE DISTÂNCIA, e isso foi medido.
+      // Com a faixa dentro, "parquímetro à frente" em MÉDIO e em LONGE eram
+      // duas famílias, cada uma com direito às suas três menções — e a mesma
+      // frase ("a oito metros", que cobre de 7,5 a 8,4 m) passava por duas
+      // portas diferentes. O canal de narração fragmentava ainda mais.
+      // Para quem ouve, é tudo a mesma notícia: há um parquímetro à frente.
+      familia: `${label}|${o.direction}`,
+      plural: nome ? NOMES[label].plural : null,
+      direcao: o.direction,
+      // O QUE ESTÁ NO SEU CAMINHO NUNCA É PAISAGEM.
+      //
+      // A habituação protegia só a prioridade ALTA. O teste de persona achou o
+      // buraco nessa proteção: um poste plantado no meio da calçada entra em
+      // cena como prioridade MÉDIA (está longe ainda), e a família
+      // `parquímetro à frente, médio` já tinha sido emudecida pelos
+      // parquímetros do meio-fio da mesma quadra. Resultado medido: o aviso do
+      // poste no caminho saiu a 3,5 m em vez de 8 m — a pessoa perdeu quatro
+      // metros, que a 1,2 m/s são três segundos e meio.
+      //
+      // `noCaminho` já desconta o que está apenas de passagem (ver `passando`,
+      // acima), então isto não reabre a torneira do mobiliário urbano: abre
+      // só para o que atravanca de verdade.
+      semHabituacao: noCaminho === true || priority === Priority.ALTA,
     };
   }
 }
@@ -552,10 +651,14 @@ export class MotionTracker {
     // fica com o histórico; os de trás não geram movimento. O AlertEngine já
     // se comporta assim (guarda um candidato por streakKey), então isto só
     // alinha o rastreio ao que o resto do app sempre fez.
+    // Com o estabilizador ligado cada objeto tem trilha própria, e esta
+    // disputa deixa de existir: cada chave tem um dono só. Sem ele, continua
+    // valendo a regra do mais próximo.
+    const chaveDe = (o) => o.trilha ?? `${o.detection.label}|${o.direction}`;
     const maisProximo = new Map();
     for (const o of objects) {
       if (o.distanceM == null) continue;
-      const k = `${o.detection.label}|${o.direction}`;
+      const k = chaveDe(o);
       const atual = maisProximo.get(k);
       if (!atual || o.distanceM < atual.distanceM) maisProximo.set(k, o);
     }
@@ -563,7 +666,7 @@ export class MotionTracker {
     // 1ª passada: o fechamento bruto de cada objeto.
     const medidas = objects.map((o) => {
       const d = o.distanceM;
-      const key = `${o.detection.label}|${o.direction}`;
+      const key = chaveDe(o);
       vistos.add(key);
       if (d == null) return { o, key, closingMs: null };
       // Está atrás de outro igual, na mesma direção: não é ele que você vai
@@ -904,6 +1007,8 @@ export class Narrador {
         candidatos.push({
           tipo: "aproximando", chave: `aprox:${chave}`, peso: 0,
           text: `${cap(comoChamar)} se aproximando ${o.direction}.`,
+          familia: `${label}|${o.direction}`,
+          plural: nome.plural, direcao: o.direction,
         });
         continue;
       }
@@ -920,6 +1025,8 @@ export class Narrador {
         candidatos.push({
           tipo: "passando", chave: `passa:${label}`, peso: 1,
           text: `${cap(comoChamar)} passando ${o.direction}.`,
+          familia: `${label}|${o.direction}`,
+          plural: nome.plural, direcao: o.direction,
         });
         continue;
       }
@@ -932,6 +1039,8 @@ export class Narrador {
         candidatos.push({
           tipo: "apareceu", chave: `novo:${chave}`, alvo: chave, peso: 2,
           text: `${cap(comoChamar)} ${ondeQuando}.`,
+          familia: `${label}|${o.direction}`,
+          plural: nome.plural, direcao: o.direction,
         });
       }
     }

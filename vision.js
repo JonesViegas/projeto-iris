@@ -77,6 +77,7 @@ const segCtx = segCanvas.getContext("2d", { willReadFrequently: true });
 export class Segmentador {
   constructor() {
     this.pipe = null;
+    this.carregando = null;   // promessa em voo: ver carregar()
     this.ocupado = false;
     this.ultimoMs = 0;
     this.erro = null;
@@ -84,18 +85,50 @@ export class Segmentador {
 
   get pronto() { return this.pipe !== null; }
 
-  /** Baixa e prepara o modelo. Chame uma vez; pode levar alguns segundos. */
+  /**
+   * Baixa e prepara o modelo. Chame uma vez; pode levar alguns segundos.
+   *
+   * A GUARDA DA PROMESSA EM VOO não é zelo: era um dos jeitos de derrubar a
+   * aba. `if (this.pipe) return` só protege DEPOIS que o await terminou, e
+   * entre o começo e o fim passam segundos. Quem marcasse "identificar
+   * calçadas" nos ajustes com a percepção já ligada disparava uma carga; o
+   * `start()` disparava outra; marcar e desmarcar duas vezes disparava mais.
+   * Cada uma instanciava um SegFormer inteiro — ~120 MB — e o navegador mata
+   * a aba sem evento, sem erro e sem log. Do lado de fora, isso é exatamente
+   * o que o usuário relata: "liguei a calçada e o app travou".
+   */
   async carregar(onProgresso) {
     if (this.pipe) return this.pipe;
-    const mod = await import(TRANSFORMERS_URL);
-    const { pipeline, env } = mod;
-    this.RawImage = mod.RawImage ?? null;
-    env.allowLocalModels = false;           // sempre do hub, com cache do service worker
-    this.pipe = await pipeline("image-segmentation", MODELO_SEG, {
-      dtype: "q8",                          // quantizado: ~4 MB em vez de 14 MB
-      progress_callback: onProgresso,
-    });
-    return this.pipe;
+    if (this.carregando) return this.carregando;   // já tem uma em voo: pegue carona
+    this.carregando = (async () => {
+      const mod = await import(TRANSFORMERS_URL);
+      const { pipeline, env } = mod;
+      this.RawImage = mod.RawImage ?? null;
+      env.allowLocalModels = false;           // sempre do hub, com cache do service worker
+      this.pipe = await pipeline("image-segmentation", MODELO_SEG, {
+        dtype: "q8",                          // quantizado: ~4 MB em vez de 14 MB
+        progress_callback: onProgresso,
+      });
+      return this.pipe;
+    })();
+    try { return await this.carregando; }
+    finally { this.carregando = null; }   // falhou? a próxima tentativa pode tentar de novo
+  }
+
+  /**
+   * Devolve a memória do modelo.
+   *
+   * O app tinha como DESLIGAR o aviso de calçada — parava o laço — e não tinha
+   * como devolver os ~120 MB que o modelo ocupa. Quem experimentasse ligar e
+   * desligar algumas vezes, ou desligasse a calçada para ligar o
+   * reconhecimento ampliado, ficava com os dois na memória mesmo tendo
+   * escolhido um. É o cenário de queda mais fácil de produzir no aparelho.
+   */
+  descarregar() {
+    try { this.pipe?.dispose?.(); } catch { /* já foi */ }
+    this.pipe = null;
+    this.carregando = null;
+    this.ocupado = false;
   }
 
   /**

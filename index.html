@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projeto Íris — percepção do ambiente</title>
-<meta name="iris-versao" content="0.12.0">
+<meta name="iris-versao" content="0.15.0">
 <meta name="description" content="Percepção Inteligente. Mais Autonomia. Mais Segurança.">
 <meta name="theme-color" content="#0A1A2F">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -206,8 +206,11 @@
     font: inherit; font-weight: 700; font-size: .92rem; line-height: 1.15;
     border: 1px solid rgba(127,233,255,.16);
   }
-  .acao:disabled { opacity: .42; cursor: default; }
-  .acao:active:not(:disabled) { transform: scale(.97); }
+  /* O botão indisponível continua focável e anunciado (aria-disabled), mas
+     precisa parecer indisponível para quem enxerga. Opacidade de 0,42 reprovava
+     em contraste; 0,62 mantém o texto legível e ainda distingue dos ativos. */
+  .acao:disabled, .acao[aria-disabled="true"] { opacity: .62; cursor: default; }
+  .acao:active:not(:disabled):not([aria-disabled="true"]) { transform: scale(.97); }
   .acao .rotulo { text-align: center; }
   #lerTexto { color: var(--ambar); }
   #descrever { color: var(--ciano-claro); }
@@ -265,6 +268,10 @@
   }
   .folha .fechar { background: var(--ciano); color: #06101C; border: 0; }
   .resumo { font-size: .85rem; opacity: .85; line-height: 1.55; margin: 0; }
+  /* Cabeçalho de seção dentro dos ajustes. Existe para o leitor de tela: com
+     ele, quem navega por cabeçalhos pula direto para o bloco que procura, em
+     vez de percorrer trinta controles. */
+  .secao { font-size: .95rem; margin: 14px 0 2px; color: var(--ciano-claro); }
   .nota { font-size: .78rem; opacity: .7; line-height: 1.5; margin: 0; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -286,7 +293,14 @@
 <body>
   <header class="marca">
     <img src="icons/iris-logo.svg" alt="" aria-hidden="true">
-    <span class="nome"><small>Projeto</small>ÍRIS</span>
+    <!-- A página não tinha NENHUM cabeçalho. Quem usa leitor de tela navega
+         por cabeçalhos antes de qualquer outra coisa: sem um `h1`, o atalho de
+         "próximo cabeçalho" não leva a lugar nenhum e a pessoa tem de varrer a
+         tela elemento por elemento para descobrir onde está. O `h1` carrega o
+         nome e o que o app faz; o texto decorativo da marca fica escondido do
+         leitor, para não ser lido duas vezes. -->
+    <h1 class="sr-only">Projeto Íris — percepção do ambiente para quem não enxerga</h1>
+    <span class="nome" aria-hidden="true"><small>Projeto</small>ÍRIS</span>
     <button class="icone-btn" id="abrirAjustes" type="button" aria-label="Ajustes e validação">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -337,7 +351,14 @@
       <span id="navRestante"></span>
     </span>
     <button id="pararRota" type="button" aria-label="Encerrar a rota">Parar rota</button>
-    <button id="perguntar" type="button" aria-live="polite"
+    <!-- Sem `aria-live` no próprio botão. Um `aria-live` aqui anuncia a
+         mudança do NOME ACESSÍVEL, e o nome vinha do `aria-label`, que só
+         tinha dois valores para três estados: "Ouvindo… fale agora" e "Um
+         instante…" produziam exatamente o mesmo anúncio. Quem não enxerga não
+         vê a cor mudar e ficava sem saber se o app ainda estava ouvindo ou já
+         estava pensando. Agora cada estado tem o seu rótulo, e a transição vai
+         para a região viva educada, que é o mecanismo confiável para isso. -->
+    <button id="perguntar" type="button"
             aria-label="Conversar com o Íris. Toque e fale.">
 
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -376,13 +397,26 @@
   </main>
 
   <div>
-    <div class="relato" id="relato">
-      <button id="errou" type="button">Avisou errado</button>
-      <button id="perdeu" type="button">Não avisou</button>
+    <!-- Rótulos longos porque é o leitor de tela que os lê, e "Avisou errado"
+         sozinho não diz o que vai acontecer ao tocar. Quem está validando o
+         app na rua precisa ter certeza antes de tocar, não depois. -->
+    <div class="relato" id="relato" role="group" aria-label="Marcar erro do aplicativo">
+      <button id="errou" type="button"
+              aria-label="Avisou errado. Registra que o aplicativo anunciou algo que não existia.">Avisou errado</button>
+      <button id="perdeu" type="button"
+              aria-label="Não avisou. Registra um obstáculo real que o aplicativo deixou passar.">Não avisou</button>
     </div>
 
     <nav class="barra" aria-label="Ações">
-      <button class="acao" id="lerTexto" type="button" disabled>
+      <!-- `aria-disabled` NO LUGAR DE `disabled`, e não é preciosismo.
+           VoiceOver e TalkBack PULAM controles desabilitados na navegação por
+           deslize. Com `disabled`, uma pessoa cega varrendo a barra inferior
+           encontrava só o botão Iniciar e nunca descobria que "Ler texto" e
+           "O que tem aqui?" existem — eles só apareciam depois de ela ter
+           iniciado a percepção por conta própria.
+           Com `aria-disabled` o botão continua encontrável e anunciado como
+           indisponível, e tocar nele explica em voz alta o que falta fazer. -->
+      <button class="acao" id="lerTexto" type="button" aria-disabled="true">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -399,7 +433,7 @@
         <span class="rotulo" id="rotuloPrincipal">Iniciar</span>
       </button>
 
-      <button class="acao" id="descrever" type="button" disabled>
+      <button class="acao" id="descrever" type="button" aria-disabled="true">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
@@ -448,6 +482,26 @@
           <option value="2">Tudo o que reconhecer</option>
         </select>
       </label>
+
+      <!-- Toda pessoa cega que usa este app tem VoiceOver ou TalkBack ligado:
+           é assim que ela instalou e abriu o app. Sem esta opção, cada frase
+           era dita duas vezes — uma pela voz do Íris, outra pelo leitor de
+           tela — e a barra de status interrompia a leitura dos botões.
+           Ver politicaDeVoz(), em fala.js. -->
+      <label class="campo">
+        Quem fala
+        <select id="selModoVoz">
+          <option value="iris">A voz do Íris (padrão)</option>
+          <option value="leitor">Meu leitor de tela — Íris só avisa de perigo</option>
+          <option value="ambos">Os dois (vai repetir)</option>
+        </select>
+      </label>
+      <p class="nota" id="notaModoVoz">
+        Use VoiceOver ou TalkBack? Escolha “Meu leitor de tela”: o Íris passa a
+        escrever os avisos comuns para o seu leitor dizer, com a sua voz e a sua
+        velocidade, e guarda a própria voz para obstáculo e manobra, que não
+        podem esperar a vez na fila.
+      </p>
 
       <label class="campo">
         Precisão do reconhecimento
@@ -527,6 +581,22 @@
       <button class="sec" id="exportar" type="button">Exportar diário da sessão</button>
       <button class="sec" id="limparDiario" type="button">Apagar diário</button>
 
+      <h3 class="secao">Barreiras de calçada</h3>
+      <p class="nota">
+        Buraco, bueiro aberto, tapume e degrau que o app encontra viram registro
+        com local e data, aqui no aparelho. Andando, conte o que aconteceu —
+        “tropecei”, “tive que descer para a rua”, “não consegui passar” — e o
+        relato entra no caso. É o relato, e não a detecção, que transforma isso
+        numa denúncia que alguém consegue usar.
+      </p>
+      <p class="resumo" id="resumoBarreiras"></p>
+      <button class="sec" id="exportarBarreiras" type="button">Exportar denúncias</button>
+      <button class="sec" id="limparBarreiras" type="button">Apagar barreiras registradas</button>
+      <p class="nota">
+        O arquivo exportado não leva imagem nenhuma, e não identifica você: só o
+        tipo de barreira, o local aproximado, a data e o que você contou.
+      </p>
+
       <p class="nota">
         Complemento à bengala e ao cão-guia, nunca substituto. O app informa a cor do semáforo
         que enxerga, mas não indica a hora de atravessar. Nenhuma imagem sai do aparelho.
@@ -537,7 +607,17 @@
   </dialog>
 
   <!-- So mudancas de estado vao ao leitor de tela; as falas do app usam voz propria. -->
-  <p class="sr-only" id="live" aria-live="assertive"></p>
+  <!-- DUAS REGIÕES VIVAS, E NÃO UMA.
+       Antes havia uma só, `assertive`, e tudo passava por ela: narração do
+       ambiente, resposta a toque, confirmação de ajuste. `assertive` manda o
+       leitor de tela INTERROMPER o que está lendo — então a pessoa não
+       conseguia ouvir o rótulo de um botão até o fim, porque a barra de status
+       cortava a frase no meio a cada aviso.
+       Agora o comum é `polite` (espera a vez) e só o obstáculo iminente é
+       `assertive` (interrompe, porque é para isso que ele existe). Quem
+       escreve onde é decidido por `politicaDeVoz`, em fala.js. -->
+  <p class="sr-only" id="live" aria-live="polite" aria-atomic="true"></p>
+  <p class="sr-only" id="liveUrgente" aria-live="assertive" aria-atomic="true"></p>
   <script type="module" src="app.js"></script>
 </body>
 </html>

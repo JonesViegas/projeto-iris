@@ -32,6 +32,10 @@ export const Acao = {
   SOCORRO: "socorro",
   REPETIR: "repetir",
   AJUDA: "ajuda",
+  // Registrar uma barreira de calçada, com a dificuldade que ela causou. É o
+  // único caminho possível para quem não enxerga relatar na hora, de pé, no
+  // meio da calçada — procurar um botão na tela, ali, não é opção.
+  ANOTAR_BARREIRA: "anotar-barreira",
   ENCERRAR: "encerrar",
   PERGUNTA: "pergunta",
 };
@@ -55,6 +59,25 @@ const REGRAS = [
   { acao: Acao.DESCREVER, re: /^(o que (tem|ha) (aqui|na minha frente|a minha frente|em volta|ao redor|a minha volta|na frente)|descreve?r?( (o ambiente|aqui|isso|o lugar))?|o que (voce|vc) (ve|esta vendo))$/ },
   { acao: Acao.REPETIR, re: /^(repete|repetir|repita|fala de novo|o que (voce|vc) disse|nao entendi)$/ },
   { acao: Acao.AJUDA, re: /^(ajuda|o que (voce|vc) (faz|sabe fazer)|quais (sao os )?comandos|como (eu )?uso)$/ },
+
+  // Barreira de calçada. A frase carrega a DIFICULDADE junto, porque é ela que
+  // transforma a detecção em denúncia: "havia um tapume" é um dado, "havia um
+  // tapume e eu tive que descer para a rua" é uma violação de direito com
+  // consequência narrável. Cada regra devolve a dificuldade que ela expressa.
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "cai",
+    re: /\b(eu )?(cai|caí|levei um tombo|cai no chao|cai aqui)\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "tropecei",
+    re: /\b(eu )?(tropecei|bati|esbarrei|machuquei o pe|torci o pe)\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "fui_para_rua",
+    re: /\b(tive|precisei) (que |de )?(descer|ir) (pra|para) (a )?(rua|pista)|\bdesci (pra|para) (a )?rua\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "nao_passei",
+    re: /\b(nao (consegui|deu (pra|para)) passar|tive que voltar|nao da (pra|para) passar|caminho (esta|ta) bloqueado)\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "pedi_ajuda",
+    re: /\b(precisei|tive) (de |que )?pedir ajuda|\bpedi ajuda\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: "desviei",
+    re: /\b(tive|precisei) (que |de )?desviar|\bdesviei\b/ },
+  { acao: Acao.ANOTAR_BARREIRA, dificuldade: null,
+    re: /\b(anota|anotar|registra|registrar|marca|marcar) (essa |esta |a |uma )?(barreira|calcada|obstaculo|problema|denuncia)\b|\b(a )?calcada (esta|ta) (ruim|quebrada|horrivel|impossivel)\b/ },
   // Sair da conversa falando, sem procurar o botão. Casa a frase inteira de
   // propósito: "obrigado, e o que tem à direita?" é pergunta, não despedida.
   {
@@ -76,7 +99,12 @@ export function interpretarComando(falado) {
   const t = normalizarFala(original);
   if (!t) return null;
 
-  for (const r of REGRAS) if (r.re.test(t)) return { acao: r.acao, texto: original };
+  for (const r of REGRAS) {
+    if (!r.re.test(t)) continue;
+    // `dificuldade` só existe nas regras de barreira; nas outras sai undefined
+    // e quem chama ignora.
+    return { acao: r.acao, dificuldade: r.dificuldade, texto: original };
+  }
 
   const m = t.match(IR);
   if (m) {
@@ -101,6 +129,9 @@ export const AJUDA_FALADA =
   "Você pode dizer: onde estou; o que tem na minha frente; leia isso; me leva até a farmácia; "
   + "parar rota; repete; ou socorro. Com a descrição detalhada ligada, pode perguntar qualquer "
   + "coisa sobre o que a câmera mostra, como: essa nota é de quanto, ou tem cadeira livre. "
+  + "Se a calçada atrapalhar, me conte: diga anota essa barreira, ou simplesmente o que "
+  + "aconteceu — tive que descer para a rua, tropecei, não consegui passar. Eu guardo o "
+  + "local e o que você disse, e isso vira denúncia. "
   + "Pode continuar falando que eu continuo ouvindo. Para encerrar, diga: pode parar.";
 
 // ============================================================

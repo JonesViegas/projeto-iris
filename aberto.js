@@ -187,6 +187,7 @@ export class DetectorAberto {
   constructor({ largura = 384 } = {}) {
     this.largura = largura;
     this.pipe = null;
+    this.carregando = null;   // promessa em voo: ver carregar()
     this.ocupado = false;
     this.rodada = 0;
     this.ultimoMs = 0;
@@ -196,22 +197,32 @@ export class DetectorAberto {
 
   get pronto() { return this.pipe !== null; }
 
+  // Mesma guarda do Segmentador, pelo mesmo motivo e com consequência pior:
+  // aqui são ~250 MB por cópia. Duas cargas simultâneas não fazem o app ficar
+  // lento — fazem o navegador matar a aba, calado.
   async carregar(onProgresso) {
     if (this.pipe) return this.pipe;
-    const mod = await import(TRANSFORMERS_URL);
-    const { pipeline, env } = mod;
-    this.RawImage = mod.RawImage ?? null;
-    env.allowLocalModels = false;
-    this.pipe = await pipeline("zero-shot-object-detection", MODELO, {
-      dtype: "q8",
-      progress_callback: onProgresso,
-    });
-    return this.pipe;
+    if (this.carregando) return this.carregando;
+    this.carregando = (async () => {
+      const mod = await import(TRANSFORMERS_URL);
+      const { pipeline, env } = mod;
+      this.RawImage = mod.RawImage ?? null;
+      env.allowLocalModels = false;
+      this.pipe = await pipeline("zero-shot-object-detection", MODELO, {
+        dtype: "q8",
+        progress_callback: onProgresso,
+      });
+      return this.pipe;
+    })();
+    try { return await this.carregando; }
+    finally { this.carregando = null; }
   }
 
   descarregar() {
     try { this.pipe?.dispose?.(); } catch { /* já foi */ }
     this.pipe = null;
+    this.carregando = null;
+    this.ocupado = false;
   }
 
   /**

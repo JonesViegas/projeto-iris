@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   Canal, FilaDeFala, Fraseador, agregar, lista, EstadoDaCena,
+  Habituacao, frasePaisagem,
 } from "../fala.js";
 import { numero, Direction, Proximity } from "../core.js";
 
@@ -129,4 +130,99 @@ test("oscilação de distância não quebra a estabilidade", () => {
   const b = { ...obj("person"), distanceM: 2.7 };
   e.atualizar([a], 0);
   assert.equal(e.atualizar([b], 500).mudou, false);
+});
+
+// ============================================================
+// Habituação
+// ============================================================
+// O que se repete sem consequência vira paisagem. Estes testes guardam a
+// fronteira entre "parar de recitar o cenário" e "deixar de avisar do perigo",
+// que é onde um módulo como este fica perigoso se for longe demais.
+
+test("habituação: a primeira vez passa, e o silêncio exigido dobra", () => {
+  const h = new Habituacao({ intervaloBaseMs: 10000, mudoApos: 99 });
+  assert.equal(h.avaliar("poste|esq|0", 0).permite, true);
+  h.registrar("poste|esq|0", 0);
+
+  // depois da 1a vez: 10 s
+  assert.equal(h.avaliar("poste|esq|0", 9000).permite, false);
+  assert.equal(h.avaliar("poste|esq|0", 10000).permite, true);
+  h.registrar("poste|esq|0", 10000);
+
+  // depois da 2a: 20 s
+  assert.equal(h.avaliar("poste|esq|0", 25000).permite, false);
+  assert.equal(h.avaliar("poste|esq|0", 30000).permite, true);
+  h.registrar("poste|esq|0", 30000);
+
+  // depois da 3a: 40 s
+  assert.equal(h.avaliar("poste|esq|0", 60000).permite, false);
+  assert.equal(h.avaliar("poste|esq|0", 70000).permite, true);
+});
+
+test("PERIGO NUNCA VIRA PAISAGEM: urgente passa sempre", () => {
+  // A regra que impede este módulo de matar alguém. Um carro vindo na sua
+  // direção pela quinta vez na mesma quadra é a quinta vez que você precisa
+  // saber — por mais repetitiva que a frase seja.
+  const h = new Habituacao({ intervaloBaseMs: 10000, mudoApos: 2 });
+  for (let i = 0; i < 10; i++) {
+    const r = h.avaliar("carro|frente|0", i * 500, { urgente: true });
+    assert.equal(r.permite, true, `a ${i + 1}a vez foi calada`);
+    h.registrar("carro|frente|0", i * 500, { urgente: true });
+  }
+});
+
+test("família emudecida rende UMA frase de paisagem, e só uma", () => {
+  const h = new Habituacao({ intervaloBaseMs: 1000, mudoApos: 2 });
+  h.registrar("parking meter|à esquerda|1", 0);
+  h.registrar("parking meter|à esquerda|1", 5000);
+
+  const a = h.avaliar("parking meter|à esquerda|1", 60000);
+  assert.equal(a.permite, false);
+  assert.equal(a.paisagem, true, "a deixa para dizer o padrão");
+  h.marcarPaisagem("parking meter|à esquerda|1", 60000);
+
+  const b = h.avaliar("parking meter|à esquerda|1", 70000);
+  assert.equal(b.permite, false);
+  assert.equal(b.paisagem, false, "o padrão não se repete");
+});
+
+test("mudar de família zera a habituação", () => {
+  // Carro à direita vira carro à FRENTE: é outra notícia, e tem de sair na
+  // hora, por mais que a primeira estivesse emudecida.
+  const h = new Habituacao({ intervaloBaseMs: 10000, mudoApos: 2 });
+  h.registrar("car|à direita|1", 0);
+  h.registrar("car|à direita|1", 1000);
+  assert.equal(h.avaliar("car|à direita|1", 2000).permite, false);
+  assert.equal(h.avaliar("car|à frente|1", 2000).permite, true);
+});
+
+test("sumiu por muito tempo: a família é esquecida", () => {
+  const h = new Habituacao({ intervaloBaseMs: 10000, mudoApos: 2, esquecerApos: 60000 });
+  h.registrar("banco|esq|1", 0);
+  h.registrar("banco|esq|1", 1000);
+  assert.equal(h.avaliar("banco|esq|1", 30000).permite, false);
+  assert.equal(h.avaliar("banco|esq|1", 90000).permite, true, "outra quadra, outra história");
+});
+
+test("frase de paisagem diz o padrão, não o caso", () => {
+  assert.equal(frasePaisagem("parquímetros", "à esquerda"), "Há parquímetros ao longo da sua esquerda.");
+  assert.equal(frasePaisagem("carros", "à direita"), "Há carros ao longo da sua direita.");
+  assert.equal(frasePaisagem(null, "à direita"), null);
+});
+
+test("a fila aplica a habituação e substitui pela paisagem", () => {
+  const fila = new FilaDeFala({ habituacao: new Habituacao({ intervaloBaseMs: 1000, mudoApos: 2 }) });
+  const oferta = (t) => {
+    fila.oferecer({
+      texto: `Parquímetro à esquerda, a dois metros e meio.`, canal: Canal.NARRACAO,
+      familia: "parking meter|à esquerda|0", plural: "parquímetros", direcao: "à esquerda",
+    }, t);
+    return fila.proxima(t, false);
+  };
+  assert.ok(oferta(0));
+  assert.ok(oferta(20000));
+  const terceira = oferta(60000);
+  assert.ok(terceira);
+  assert.equal(terceira.texto, "Há parquímetros ao longo da sua esquerda.");
+  assert.equal(oferta(120000), null, "depois do padrão, silêncio");
 });
