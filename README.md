@@ -598,9 +598,17 @@ Atualizar:
 tar czf - index.html app.js core.js fala.js navegacao.js rotas.js posicao.js \
     vision.js aberto.js nuvem.js integracao.js ocr.js diario.js sw.js \
     localizar.js lugares.js embedder.js ameacas.js conversa.js orientar.js \
+    estavel.js barreiras.js \
     manifest.webmanifest icons \
   | ssh sgcobra 'tar xzf - -C /opt/iris/web'
 ```
+
+> **Esta lista tem que ser a mesma do `SHELL` em `sw.js`.** Módulo que entra no app e
+> não entra aqui não é publicado, e o `import` dele devolve 404: o app não **abre** —
+> nem online, nem offline —, e o sintoma aparece no celular do testador, não aqui.
+> `test/offline.test.mjs` compara o `SHELL` com os imports de `app.js`, mas não tem
+> como saber o que o `tar` leva. Ao criar um módulo, mexa nos dois lugares. Foi assim
+> que `estavel.js` e `barreiras.js` quase ficaram de fora na 0.15.
 
 > **Por que não na micro2.** A tentativa inicial foi hospedar na micro2 (10.0.0.36) com
 > proxy pela sgcobra. O iptables da micro2 foi liberado, mas a porta 8080 continua
